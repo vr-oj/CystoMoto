@@ -62,9 +62,6 @@ jobs:
           }
           Write-Host "PyInstaller output verified."
 
-      - name: Install Inno Setup 6
-        run: choco install innosetup --version=6.2.2 -y
-
       - name: Create output directory
         shell: pwsh
         run: New-Item -ItemType Directory -Force -Path installer_output
@@ -151,81 +148,13 @@ jobs:
           retention-days: 30
 
 # ─────────────────────────────────────────────────────────────────────────────
-# macOS (Intel / x86_64): same steps on macos-13 (last Intel runner)
-# ─────────────────────────────────────────────────────────────────────────────
-  build-macos-x86_64:
-    name: Build macOS DMG (Intel)
-    runs-on: macos-13
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' &&
-       (github.event.inputs.build_target == 'all' ||
-        github.event.inputs.build_target == 'macos'))
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: "pip"
-          cache-dependency-path: cysto_app/requirements.txt
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r cysto_app/requirements.txt
-          pip install pyinstaller
-
-      - name: Install create-dmg
-        run: brew install create-dmg
-
-      - name: Run PyInstaller (macOS)
-        run: pyinstaller CystoMoto_macos.spec --noconfirm
-
-      - name: Verify .app bundle
-        run: |
-          if [ ! -d "dist/CystoMoto.app" ]; then
-            echo "ERROR: dist/CystoMoto.app not found"
-            exit 1
-          fi
-          echo "App bundle verified."
-
-      - name: Create output directory
-        run: mkdir -p installer_output
-
-      - name: Build DMG (x86_64)
-        run: |
-          create-dmg \
-            --volname "CystoMoto ${{ env.APP_VERSION }}" \
-            --volicon "cysto_app/ui/icons/CystoMoto.icns" \
-            --window-pos 200 120 \
-            --window-size 600 400 \
-            --icon-size 100 \
-            --icon "CystoMoto.app" 175 190 \
-            --hide-extension "CystoMoto.app" \
-            --app-drop-link 425 190 \
-            "installer_output/CystoMoto_${{ env.APP_VERSION }}_macOS_x86_64.dmg" \
-            "dist/"
-
-      - name: Upload macOS x86_64 DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: CystoMoto-macOS-x86_64-DMG-v${{ env.APP_VERSION }}
-          path: installer_output/CystoMoto_${{ env.APP_VERSION }}_macOS_x86_64.dmg
-          if-no-files-found: error
-          retention-days: 30
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Release: Create a draft GitHub Release with all 3 installers attached.
-# Only runs on version tag pushes (v*.*.*), after all 3 builds succeed.
+# Release: Create a draft GitHub Release with both installers attached.
+# Only runs on version tag pushes (v*.*.*), after both builds succeed.
 # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-windows, build-macos-arm64, build-macos-x86_64]
+    needs: [build-windows, build-macos-arm64]
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
@@ -241,12 +170,6 @@ jobs:
           name: CystoMoto-macOS-arm64-DMG-v${{ env.APP_VERSION }}
           path: release_assets/
 
-      - name: Download macOS x86_64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: CystoMoto-macOS-x86_64-DMG-v${{ env.APP_VERSION }}
-          path: release_assets/
-
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -256,7 +179,6 @@ jobs:
           files: |
             release_assets/CystoMoto_Setup_v${{ env.APP_VERSION }}.exe
             release_assets/CystoMoto_${{ env.APP_VERSION }}_macOS_arm64.dmg
-            release_assets/CystoMoto_${{ env.APP_VERSION }}_macOS_x86_64.dmg
           body: |
             ## CystoMoto v${{ env.APP_VERSION }}
 
@@ -268,9 +190,6 @@ jobs:
 
             **macOS (Apple Silicon — M1/M2/M3)**
             Download `CystoMoto_${{ env.APP_VERSION }}_macOS_arm64.dmg`, open it, and drag CystoMoto to Applications.
-
-            **macOS (Intel)**
-            Download `CystoMoto_${{ env.APP_VERSION }}_macOS_x86_64.dmg`, open it, and drag CystoMoto to Applications.
 
             > Note: On macOS, right-click the app and choose "Open" the first time to bypass Gatekeeper (unsigned app).
 
