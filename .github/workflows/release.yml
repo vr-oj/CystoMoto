@@ -1,0 +1,126 @@
+name: Build & Release
+
+# Triggered by pushing a version tag, e.g.:
+#   git tag v0.1.0
+#   git push origin v0.1.0
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write   # required to create GitHub Releases
+
+jobs:
+
+  # ── macOS: build .app → .dmg ─────────────────────────────────────────────────
+  build-macos:
+    runs-on: macos-latest   # arm64 (Apple Silicon)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pyinstaller pillow
+          pip install -r cysto_app/requirements.txt
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Patch version from tag
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building version: $VERSION"
+          # About dialog
+          sed -i '' "s/APP_VERSION = \"[^\"]*\"/APP_VERSION = \"$VERSION\"/" cysto_app/utils/config.py
+          # DMG filename in build script
+          sed -i '' "s/APP_VERSION=\"[^\"]*\"/APP_VERSION=\"$VERSION\"/" build_macos.sh
+          # macOS app bundle metadata
+          sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/" CystoMoto_macos.spec
+          sed -i '' "s/\"CFBundleVersion\": \"[^\"]*\"/\"CFBundleVersion\": \"$VERSION\"/" CystoMoto_macos.spec
+          sed -i '' "s/\"CFBundleShortVersionString\": \"[^\"]*\"/\"CFBundleShortVersionString\": \"$VERSION\"/" CystoMoto_macos.spec
+
+      - name: Build .app and .dmg
+        run: |
+          chmod +x build_macos.sh
+          ./build_macos.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: installer_output/*.dmg
+
+  # ── Windows: build .exe installer ────────────────────────────────────────────
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install pyinstaller
+          pip install -r cysto_app/requirements.txt
+
+      - name: Install Inno Setup 6
+        run: choco install innosetup -y
+
+      - name: Patch version from tag
+        shell: pwsh
+        run: |
+          $VERSION = $env:GITHUB_REF_NAME -replace '^v', ''
+          Write-Host "Building version: $VERSION"
+          # About dialog
+          (Get-Content cysto_app\utils\config.py -Raw) `
+            -replace 'APP_VERSION = "[^"]*"', "APP_VERSION = `"$VERSION`"" |
+            Set-Content cysto_app\utils\config.py
+          # Inno Setup installer metadata and output filename
+          (Get-Content installer\windows\CystoMoto.iss -Raw) `
+            -replace '#define MyAppVersion\s+"[^"]*"', "#define MyAppVersion `"$VERSION`"" |
+            Set-Content installer\windows\CystoMoto.iss
+
+      - name: Build installer
+        run: build_windows.bat
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer_output\*.exe
+
+  # ── Create GitHub Release with both artifacts ─────────────────────────────────
+  release:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-dmg
+          path: artifacts/
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
