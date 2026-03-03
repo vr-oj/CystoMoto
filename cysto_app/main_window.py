@@ -422,8 +422,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_start_recording(self):
-        """Open a new CSV file and begin recording."""
+        """Clear the plot, open a new CSV file, and begin recording."""
         try:
+            # Fresh trace for this recording session
+            self.pressure_plot_widget.clear_plot()
             self._start_recording()
             self._recording_active = True
             self.pump_ctrl.update_recording_state(True)
@@ -432,10 +434,17 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_stop_recording(self):
-        """Finalize and close the current CSV recording."""
+        """Finalize the CSV recording and stop the pump if it is still running."""
         try:
+            # Stop the pump first so the last CSV rows reflect the correct state
+            if self._pump_running:
+                if self._serial_thread and self._serial_thread.isRunning():
+                    self._serial_thread.send_command("O")
+                self._pump_running = False
+
             self._stop_recording()
             self._recording_active = False
+            self.pump_ctrl.update_pump_state(False)
             self.pump_ctrl.update_recording_state(False)
             self.statusBar().showMessage("Recording stopped.", 4000)
         except Exception:
@@ -618,7 +627,12 @@ class MainWindow(QMainWindow):
     def _handle_new_serial_data(self, idx: int, t: float, p: float, mass: float):
         """Called whenever SerialThread emits data_ready(idx, t, p, mass)."""
         self._last_data_time = t
+        # Always update device status display regardless of recording state
         self.top_ctrl.update_device_data(idx, t, p)
+
+        # Plot and CSV are only active while recording
+        if not self._recording_active:
+            return
 
         ax = self.plot_control_panel.auto_x_cb.isChecked()
         ay = self.plot_control_panel.auto_y_cb.isChecked()
@@ -626,7 +640,6 @@ class MainWindow(QMainWindow):
 
         self.pressure_plot_widget.update_plot(t, p, mass, ax, ay, ay_mass)
 
-        # Write to CSV if recording is active
         if self._csv_writer:
             self._csv_writer.writerow(
                 [idx, f"{t:.4f}", f"{p:.4f}", f"{mass:.4f}", 1 if self._pump_running else 0]
