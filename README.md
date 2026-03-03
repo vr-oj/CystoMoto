@@ -58,6 +58,42 @@ Download the latest release for your platform from the [Releases page](../../rel
 
 ---
 
+## Building a macOS Release Manually (for Intel Macs)
+
+The automated CI only builds for Apple Silicon (arm64). To include an Intel macOS DMG in a release, build it manually on an Intel Mac and upload it alongside the CI-generated artifacts.
+
+**Requirements:** Python 3.10+, Homebrew
+
+```bash
+# 1. Install build tools
+pip install pyinstaller pillow
+pip install -r cysto_app/requirements.txt
+brew install create-dmg
+
+# 2. Patch the version number (replace 0.1.0 with the release version)
+VERSION="0.1.0"
+sed -i '' "s/APP_VERSION = \"[^\"]*\"/APP_VERSION = \"$VERSION\"/" cysto_app/utils/config.py
+sed -i '' "s/APP_VERSION=\"[^\"]*\"/APP_VERSION=\"$VERSION\"/" build_macos.sh
+sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/" CystoMoto_macos.spec
+sed -i '' "s/\"CFBundleVersion\": \"[^\"]*\"/\"CFBundleVersion\": \"$VERSION\"/" CystoMoto_macos.spec
+sed -i '' "s/\"CFBundleShortVersionString\": \"[^\"]*\"/\"CFBundleShortVersionString\": \"$VERSION\"/" CystoMoto_macos.spec
+
+# 3. Build
+chmod +x build_macos.sh
+./build_macos.sh
+```
+
+This produces `installer_output/CystoMoto_<version>_macOS_x86_64.dmg`.
+
+**Upload to the release:**
+1. Go to the repo → **Releases** → open the draft release for this version.
+2. Drag and drop the `.dmg` into the assets area.
+3. Publish the release.
+
+> To verify your architecture before building, run `uname -m`. It should print `x86_64` for Intel.
+
+---
+
 ## Install from Source
 
 ### Requirements
