@@ -90,6 +90,7 @@ jobs:
             Set-Content installer\windows\CystoMoto.iss
 
       - name: Build installer
+        shell: cmd
         run: build_windows.bat
 
       - name: Upload installer artifact
