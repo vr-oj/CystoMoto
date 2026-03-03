@@ -397,7 +397,8 @@ class MainWindow(QMainWindow):
             self.pressure_plot_widget.add_pump_marker(self._last_data_time, running=True)
 
             if self._serial_thread and self._serial_thread.isRunning():
-                self._serial_thread.send_command("L")
+                self._serial_thread.set_idle_timeout_enabled(True)  # re-arm watchdog
+                self._serial_thread.send_command("G")
             self.statusBar().showMessage("Pump started.", 4000)
         except Exception:
             log.exception("Failed to start pump")
@@ -411,7 +412,8 @@ class MainWindow(QMainWindow):
             self.pressure_plot_widget.add_pump_marker(self._last_data_time, running=False)
 
             if self._serial_thread and self._serial_thread.isRunning():
-                self._serial_thread.send_command("O")
+                self._serial_thread.send_command("S")
+                self._serial_thread.set_idle_timeout_enabled(False)  # Arduino goes silent; suppress watchdog
             self.statusBar().showMessage(
                 "Pump stopped. Recording continues (pump marked off)." if self._recording_active
                 else "Pump stopped.",
@@ -439,7 +441,8 @@ class MainWindow(QMainWindow):
             # Stop the pump first so the last CSV rows reflect the correct state
             if self._pump_running:
                 if self._serial_thread and self._serial_thread.isRunning():
-                    self._serial_thread.send_command("O")
+                    self._serial_thread.send_command("S")
+                    self._serial_thread.set_idle_timeout_enabled(False)
                 self._pump_running = False
 
             self._stop_recording()
