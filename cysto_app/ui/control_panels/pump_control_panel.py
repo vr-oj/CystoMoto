@@ -14,12 +14,12 @@ log = logging.getLogger(__name__)
 class PumpControlPanel(QGroupBox):
     """UI panel for syringe pump and recording controls.
 
-    Button workflow enforced by state:
-      1. Connect         → only "Start Recording" is enabled.
-      2. Start Recording → CSV + plot begin; "Start Fill" becomes available.
-      3. Start Fill      → Arduino receives start command; "Stop Pump" active.
-      4. Stop Pump       → Arduino receives stop command; "Start Fill" active.
-      5. Stop Recording  → CSV + plot stop; all pump buttons disabled.
+    Recording and pump are independent:
+      - Connect         → "Start Recording" and "Start Fill" become available.
+      - Start Recording → CSV + plot begin; does not affect pump state.
+      - Stop Recording  → CSV + plot stop; does not affect pump state.
+      - Start Fill      → sends start command to Arduino only.
+      - Stop Pump       → sends stop command to Arduino only.
     """
 
     pump_start_requested = pyqtSignal()
@@ -29,8 +29,6 @@ class PumpControlPanel(QGroupBox):
 
     def __init__(self, parent=None):
         super().__init__("Pump & Recording", parent)
-
-        self._recording_active = False
 
         layout = QFormLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -51,7 +49,7 @@ class PumpControlPanel(QGroupBox):
         layout.addRow("Recording:", rec_row)
 
         # ── Pump row (available only while recording is active) ───────────────
-        self.start_btn = QPushButton("Start Fill")
+        self.start_btn = QPushButton("Start Pump")
         self.start_btn.setEnabled(False)
         self.start_btn.clicked.connect(self.pump_start_requested.emit)
 
@@ -66,38 +64,23 @@ class PumpControlPanel(QGroupBox):
 
     def update_connection_status(self, connected: bool):
         """Enable/disable controls on device connect or disconnect."""
-        self._recording_active = False
         if not connected:
             self.rec_start_btn.setEnabled(False)
             self.rec_stop_btn.setEnabled(False)
             self.start_btn.setEnabled(False)
             self.stop_btn.setEnabled(False)
         else:
-            # Only recording can be started at connect time
             self.rec_start_btn.setEnabled(True)
             self.rec_stop_btn.setEnabled(False)
-            self.start_btn.setEnabled(False)
+            self.start_btn.setEnabled(True)
             self.stop_btn.setEnabled(False)
 
     def update_pump_state(self, running: bool):
-        """Toggle pump buttons (only effective while recording is active)."""
-        if self._recording_active:
-            self.start_btn.setEnabled(not running)
-            self.stop_btn.setEnabled(running)
-        else:
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(False)
+        """Toggle pump buttons based on pump running state."""
+        self.start_btn.setEnabled(not running)
+        self.stop_btn.setEnabled(running)
 
     def update_recording_state(self, recording: bool):
-        """Toggle recording buttons and gate pump access on recording state."""
-        self._recording_active = recording
+        """Toggle recording buttons."""
         self.rec_start_btn.setEnabled(not recording)
         self.rec_stop_btn.setEnabled(recording)
-        if recording:
-            # Recording started — enable Start Fill, pump not yet running
-            self.start_btn.setEnabled(True)
-            self.stop_btn.setEnabled(False)
-        else:
-            # Recording stopped — disable all pump buttons
-            self.start_btn.setEnabled(False)
-            self.stop_btn.setEnabled(False)

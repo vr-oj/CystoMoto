@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QCheckBox,
     QDoubleSpinBox,
+    QSpinBox,
     QLabel,
     QPushButton,
 )
@@ -27,6 +28,7 @@ class PlotControlPanel(QGroupBox):
     """Controls for the dual live plot (Pressure + Mass vs. Time)."""
 
     autoscale_x_changed = pyqtSignal(bool)
+    window_duration_changed = pyqtSignal(int)
     autoscale_y_changed = pyqtSignal(bool)           # pressure
     autoscale_y_mass_changed = pyqtSignal(bool)      # mass
     x_axis_limits_changed = pyqtSignal(float, float)
@@ -52,8 +54,15 @@ class PlotControlPanel(QGroupBox):
 
         # X-axis
         self.auto_x_cb = QCheckBox("Auto-scale X")
-        self.auto_x_cb.setChecked(True)
+        self.auto_x_cb.setChecked(False)
         form.addRow(self.auto_x_cb)
+
+        self.window_duration_spin = QSpinBox()
+        self.window_duration_spin.setRange(10, 600)
+        self.window_duration_spin.setValue(60)
+        self.window_duration_spin.setSuffix(" s")
+        self.window_duration_spin.setMaximumWidth(80)
+        form.addRow("Window:", self.window_duration_spin)
 
         self.x_min = QDoubleSpinBox()
         self.x_max = QDoubleSpinBox()
@@ -133,6 +142,7 @@ class PlotControlPanel(QGroupBox):
         # ── Connections ───────────────────────────────────────────────────────
         self.auto_x_cb.toggled.connect(self._on_auto_x_toggled)
         self.auto_x_cb.toggled.connect(self.autoscale_x_changed.emit)
+        self.window_duration_spin.valueChanged.connect(self.window_duration_changed.emit)
 
         self.auto_y_cb.toggled.connect(self._on_auto_y_toggled)
         self.auto_y_cb.toggled.connect(self.autoscale_y_changed.emit)
@@ -165,6 +175,7 @@ class PlotControlPanel(QGroupBox):
         self.layout_changed.emit(self._current_layout)
 
     def _on_auto_x_toggled(self, checked: bool):
+        self.window_duration_spin.setEnabled(not checked)
         self.x_min.setEnabled(not checked)
         self.x_max.setEnabled(not checked)
 
@@ -208,6 +219,7 @@ class PlotControlPanel(QGroupBox):
         self.auto_x_cb.setEnabled(enabled)
         self.auto_y_cb.setEnabled(enabled)
         self.auto_y_mass_cb.setEnabled(enabled)
+        self.window_duration_spin.setEnabled(enabled and not self.auto_x_cb.isChecked())
         self.x_min.setEnabled(enabled and not self.auto_x_cb.isChecked())
         self.x_max.setEnabled(enabled and not self.auto_x_cb.isChecked())
         self.y_min.setEnabled(enabled and not self.auto_y_cb.isChecked())

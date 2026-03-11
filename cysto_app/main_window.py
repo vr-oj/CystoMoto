@@ -80,6 +80,8 @@ class MainWindow(QMainWindow):
         self._csv_writer = None
         self._recording_path = None
         self._last_data_time: float = 0.0
+        self._t_offset: float = 0.0   # accumulated offset from Arduino timer resets
+        self._last_raw_t: float = 0.0  # last raw t received from Arduino
 
         self._init_paths_and_icons()
         self._build_console_log_dock()
@@ -198,6 +200,7 @@ class MainWindow(QMainWindow):
         pc.export_plot_image_requested.connect(pw.export_as_image)
         pc.clear_plot_requested.connect(pw.clear_plot)
         pc.layout_changed.connect(pw.set_layout)
+        pc.window_duration_changed.connect(pw.set_window_duration)
 
         self.setCentralWidget(central)
 
@@ -397,7 +400,6 @@ class MainWindow(QMainWindow):
             self.pressure_plot_widget.add_pump_marker(self._last_data_time, running=True)
 
             if self._serial_thread and self._serial_thread.isRunning():
-                self._serial_thread.set_idle_timeout_enabled(True)  # re-arm watchdog
                 self._serial_thread.send_command("G")
             self.statusBar().showMessage("Pump started.", 4000)
         except Exception:
@@ -413,12 +415,7 @@ class MainWindow(QMainWindow):
 
             if self._serial_thread and self._serial_thread.isRunning():
                 self._serial_thread.send_command("S")
-                self._serial_thread.set_idle_timeout_enabled(False)  # Arduino goes silent; suppress watchdog
-            self.statusBar().showMessage(
-                "Pump stopped. Recording continues (pump marked off)." if self._recording_active
-                else "Pump stopped.",
-                4000,
-            )
+            self.statusBar().showMessage("Pump stopped.", 4000)
         except Exception:
             log.exception("Failed to stop pump")
 
@@ -429,6 +426,8 @@ class MainWindow(QMainWindow):
             # Fresh trace for this recording session
             self.pressure_plot_widget.clear_plot()
             self._start_recording()
+            self._t_offset = 0.0
+            self._last_raw_t = 0.0
             self._recording_active = True
             self.pump_ctrl.update_recording_state(True)
         except Exception:
@@ -436,18 +435,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_stop_recording(self):
-        """Finalize the CSV recording and stop the pump if it is still running."""
+        """Finalize the CSV recording."""
         try:
-            # Stop the pump first so the last CSV rows reflect the correct state
-            if self._pump_running:
-                if self._serial_thread and self._serial_thread.isRunning():
-                    self._serial_thread.send_command("S")
-                    self._serial_thread.set_idle_timeout_enabled(False)
-                self._pump_running = False
-
             self._stop_recording()
             self._recording_active = False
-            self.pump_ctrl.update_pump_state(False)
             self.pump_ctrl.update_recording_state(False)
             self.statusBar().showMessage("Recording stopped.", 4000)
         except Exception:
@@ -541,6 +532,9 @@ class MainWindow(QMainWindow):
                 self._serial_thread.status_changed.connect(
                     self._handle_serial_status_change
                 )
+                self._serial_thread.device_event.connect(
+                    self._handle_device_event
+                )
                 self._serial_thread.finished.connect(
                     self._handle_serial_thread_finished
                 )
@@ -583,6 +577,14 @@ class MainWindow(QMainWindow):
             self.pump_ctrl.update_connection_status(False)
 
     @pyqtSlot(str)
+    @pyqtSlot(str)
+    def _handle_device_event(self, event: str):
+        """Handle status messages sent by the Arduino (e.g. physical button press)."""
+        log.info(f"Device event: {event}")
+        if event.strip().upper() == "STARTED" and not self._recording_active:
+            log.info("Arduino-initiated start detected — auto-starting recording.")
+            self._on_start_recording()
+
     def _handle_serial_status_change(self, status: str):
         log.info(f"Serial status: {status}")
         self.statusBar().showMessage(f"CystoMoto Device: {status}", 4000)
@@ -629,9 +631,16 @@ class MainWindow(QMainWindow):
     @pyqtSlot(int, float, float, float)
     def _handle_new_serial_data(self, idx: int, t: float, p: float, mass: float):
         """Called whenever SerialThread emits data_ready(idx, t, p, mass)."""
-        self._last_data_time = t
+        # Detect Arduino timer reset and accumulate offset to keep time continuous
+        if t < self._last_raw_t:
+            self._t_offset += self._last_raw_t
+            log.warning(f"Arduino timer reset detected (t={t:.4f} < last={self._last_raw_t:.4f}); offset now {self._t_offset:.4f}s")
+        self._last_raw_t = t
+        t_adj = t + self._t_offset
+
+        self._last_data_time = t_adj
         # Always update device status display regardless of recording state
-        self.top_ctrl.update_device_data(idx, t, p)
+        self.top_ctrl.update_device_data(idx, t_adj, p)
 
         # Plot and CSV are only active while recording
         if not self._recording_active:
@@ -641,16 +650,16 @@ class MainWindow(QMainWindow):
         ay = self.plot_control_panel.auto_y_cb.isChecked()
         ay_mass = self.plot_control_panel.auto_y_mass_cb.isChecked()
 
-        self.pressure_plot_widget.update_plot(t, p, mass, ax, ay, ay_mass)
+        self.pressure_plot_widget.update_plot(t_adj, p, mass, ax, ay, ay_mass)
 
         if self._csv_writer:
             self._csv_writer.writerow(
-                [idx, f"{t:.4f}", f"{p:.4f}", f"{mass:.4f}", 1 if self._pump_running else 0]
+                [idx, f"{t_adj:.4f}", f"{p:.4f}", f"{mass:.4f}", 1 if self._pump_running else 0]
             )
 
         if self.dock_console.isVisible():
             self.console_out_textedit.append(
-                f"Data: Idx={idx}, Time={t:.3f}s, P={p:.2f}, Mass={mass:.2f}g"
+                f"Data: Idx={idx}, Time={t_adj:.3f}s, P={p:.2f}, Mass={mass:.2f}g"
             )
 
     # ─── Window Close Cleanup ──────────────────────────────────────────────────

@@ -58,8 +58,7 @@ class PressurePlotWidget(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
         # Figure + canvas
-        self.fig = Figure(facecolor="white")
-        self.fig.set_constrained_layout(True)
+        self.fig = Figure(facecolor="white", constrained_layout=True)
         self.canvas = FigureCanvas(self.fig)
         outer_layout.addWidget(self.canvas)
 
@@ -98,7 +97,7 @@ class PressurePlotWidget(QWidget):
         self.manual_xlim = None
         self.manual_ylim_pressure = (PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
         self.manual_ylim_mass = (PLOT_DEFAULT_MASS_Y_MIN, PLOT_DEFAULT_MASS_Y_MAX)
-        self.window_duration = 100
+        self.window_duration = 60
 
         # Pump markers: persistent data survives layout rebuilds; artists do not
         self._pump_marker_data = []  # list of (t: float, running: bool)
@@ -289,6 +288,10 @@ class PressurePlotWidget(QWidget):
 
     @pyqtSlot(float, float, float, bool, bool, bool)
     def update_plot(self, t, p, mass, auto_x, auto_y_pressure, auto_y_mass):
+        if self.times and t <= self.times[-1]:
+            log.warning(f"[plot] dropped non-monotonic packet: incoming t={t:.4f}, last plotted t={self.times[-1]:.4f}")
+            return
+
         if not self.times and self.placeholder and self.placeholder.get_visible():
             self._update_placeholder(None)
 
@@ -316,8 +319,9 @@ class PressurePlotWidget(QWidget):
                 self.ax_pressure.set_xlim(t0 - 0.5, t0 + 0.5)
         else:
             t_latest = self.times[-1]
-            xmin = max(0.0, t_latest - self.window_duration)
-            self.manual_xlim = (xmin, t_latest)
+            xmax = max(t_latest, float(self.window_duration))
+            xmin = max(0.0, xmax - self.window_duration)
+            self.manual_xlim = (xmin, xmax)
             self.ax_pressure.set_xlim(self.manual_xlim)
             self.scrollbar.hide()
 
@@ -478,6 +482,9 @@ class PressurePlotWidget(QWidget):
         self.manual_xlim = (xmin_new, xmax_new)
         self.ax_pressure.set_xlim(self.manual_xlim)
         self.canvas.draw_idle()
+
+    def set_window_duration(self, seconds: int):
+        self.window_duration = seconds
 
     # ── Pump markers ──────────────────────────────────────────────────────────
 

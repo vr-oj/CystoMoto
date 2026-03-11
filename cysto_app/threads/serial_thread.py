@@ -20,6 +20,7 @@ class SerialThread(QThread):
     data_ready = pyqtSignal(int, float, float, float)  # (frameIndex, timestamp_s, pressure, mass)
     error_occurred = pyqtSignal(str)  # For reporting errors back to the GUI
     status_changed = pyqtSignal(str)  # For general status updates
+    device_event = pyqtSignal(str)   # Non-CSV status messages from the Arduino (e.g. "STARTED")
 
     def __init__(self, port=None, baud=115200, test_csv=None, parent=None):
         super().__init__(parent)
@@ -32,7 +33,6 @@ class SerialThread(QThread):
         self._got_first_packet = False  # Have we seen at least one valid line?
         self._last_data_time = None  # Timestamp (time.time()) of last valid packet
         self._stop_requested = False
-        self._idle_timeout_enabled = True  # watchdog for streaming silence
 
 
         # For sending commands (not used here, but kept for future)
@@ -40,20 +40,13 @@ class SerialThread(QThread):
         self.mutex = QMutex()
         self.wait_condition = QWaitCondition()
 
-    def set_idle_timeout_enabled(self, enabled: bool):
-        """Toggle the idle-timeout watchdog used during streaming."""
-        self._idle_timeout_enabled = bool(enabled)
-        self._got_first_packet = False
-        self._last_data_time = None
-
     def run(self):
         """Main loop for reading from the CystoMoto device.
 
-        If a serial ``port`` is provided, the thread opens it and emits
-        ``data_ready`` for each valid packet. Lack of new data for
-        ``IDLE_TIMEOUT_S`` seconds after the first packet triggers
-        shutdown.  When no ``port`` is given the thread immediately
-        reports an error and exits.
+        Opens the serial port and emits ``data_ready`` for each valid packet.
+        If no data arrives for ``IDLE_TIMEOUT_S`` seconds after the first
+        packet, the thread shuts down. Reports an error and exits immediately
+        if no port is specified.
         """
         self.running = True
         self._got_first_packet = False
@@ -114,9 +107,9 @@ class SerialThread(QThread):
 
                             parts = [fld.strip() for fld in line.split(",")]
                             if len(parts) < 3:
-                                log.warning(
-                                    f"Malformed data line (expected ≥3 fields): {line}"
-                                )
+                                # Not a data packet — treat as a status event from the device
+                                log.info(f"Device event: {line}")
+                                self.device_event.emit(line)
                             else:
                                 try:
                                     frame_idx_device = int(parts[0])
@@ -169,8 +162,7 @@ class SerialThread(QThread):
 
                 # ---- Idle timeout watchdog ---------------------------------
                 if (
-                    self._idle_timeout_enabled
-                    and self._got_first_packet
+                    self._got_first_packet
                     and self._last_data_time is not None
                     and (time.time() - self._last_data_time) > IDLE_TIMEOUT_S
                 ):
