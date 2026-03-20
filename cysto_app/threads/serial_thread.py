@@ -24,7 +24,7 @@ VIRTUAL_CONTRACTION_DURATION_S = 3.5
 
 
 class SerialThread(QThread):
-    data_ready = pyqtSignal(int, float, float, float)  # (frameIndex, timestamp_s, pressure, mass)
+    data_ready = pyqtSignal(int, float, float, float)  # (frameIndex, timestamp_s, pressure, secondary_channel)
     error_occurred = pyqtSignal(str)  # For reporting errors back to the GUI
     status_changed = pyqtSignal(str)  # For general status updates
     device_event = pyqtSignal(str)  # Non-CSV status messages from the Arduino (e.g. "STARTED")
@@ -55,6 +55,8 @@ class SerialThread(QThread):
         self._virtual_mass_zero_g = 0.0
         self._virtual_pressure_zero_mmhg = 0.0
         self._virtual_pump_running = False
+        self._fallback_frame_idx = 0
+        self._detected_stream_format = None
 
     def run(self):
         """Main loop for reading from the CystoMoto device."""
@@ -198,10 +200,7 @@ class SerialThread(QThread):
             return
 
         try:
-            frame_idx_device = int(parts[0])
-            t_device = float(parts[1])
-            pressure = float(parts[2])
-            mass = float(parts[3]) if len(parts) >= 4 else 0.0
+            frame_idx_device, t_device, pressure, mass = self._parse_sample_parts(parts)
         except ValueError as ve:
             log.error("Parse error for line '%s': %s", line, ve)
             return
@@ -210,6 +209,56 @@ class SerialThread(QThread):
         if not self._got_first_packet:
             self._got_first_packet = True
         self._last_data_time = time.time()
+
+    @staticmethod
+    def _looks_like_int_token(token: str) -> bool:
+        stripped = token.strip()
+        if not stripped:
+            return False
+        if stripped[0] in "+-":
+            stripped = stripped[1:]
+        return stripped.isdigit()
+
+    def _next_fallback_frame_idx(self) -> int:
+        idx = self._fallback_frame_idx
+        self._fallback_frame_idx += 1
+        return idx
+
+    def _note_stream_format(self, fmt: str):
+        if self._detected_stream_format == fmt:
+            return
+        self._detected_stream_format = fmt
+        if fmt == "pressure_tension_time":
+            log.info(
+                "Detected 3-field serial stream format: avg_pressure,avg_tension,current_time. "
+                "Using a synthesized frame index and mapping Avg Tension into the app's "
+                "existing second data channel."
+            )
+        elif fmt == "frame_time_pressure":
+            log.info("Detected legacy 3-field serial stream format: frame,time,pressure.")
+        elif fmt == "frame_time_pressure_mass":
+            log.info("Detected legacy 4-field serial stream format: frame,time,pressure,mass.")
+
+    def _parse_sample_parts(self, parts):
+        if self._looks_like_int_token(parts[0]):
+            frame_idx_device = int(parts[0])
+            t_device = float(parts[1])
+            pressure = float(parts[2])
+            mass = float(parts[3]) if len(parts) >= 4 else 0.0
+            if len(parts) >= 4:
+                self._note_stream_format("frame_time_pressure_mass")
+            else:
+                self._note_stream_format("frame_time_pressure")
+            return frame_idx_device, t_device, pressure, mass
+
+        if len(parts) == 3:
+            pressure = float(parts[0])
+            mass = float(parts[1])
+            t_device = float(parts[2])
+            self._note_stream_format("pressure_tension_time")
+            return self._next_fallback_frame_idx(), t_device, pressure, mass
+
+        raise ValueError("Unsupported serial sample format")
 
     def _reset_virtual_state(self):
         now_s = time.monotonic()

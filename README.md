@@ -133,13 +133,23 @@ make run
 
 ## Arduino Firmware
 
-The app expects serial data at **115200 baud** in this format:
+The app expects serial data at **115200 baud** and accepts either of these stream formats:
+
+Legacy format:
 
 ```
 frame_index,elapsed_time_s,pressure_mmhg[,mass_g]
 ```
 
-The `mass_g` field is optional — if omitted, mass is recorded as `0.0`.
+The `mass_g` field is optional. If it is omitted, the app records the second channel as `0.0`.
+
+Current firmware format:
+
+```
+avg_pressure,avg_tension,current_time_s
+```
+
+When the Arduino sends `Avg Pressure, Avg Tension, Current Time`, CystoMoto synthesizes a frame index internally and maps `Avg Tension` into the app's existing second numeric channel so the current plotting and CSV pipeline keep working.
 
 If you do not have hardware connected, choose **Virtual CystoMoto** in the device list. The built-in simulator emits realistic pressure and mass data continuously and responds to the same `Z`, `G`, and `S` commands used by the Arduino workflow.
 
