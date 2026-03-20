@@ -53,3 +53,4 @@ def load_app_settings():
 # --- Constants for setting keys ---
 SETTING_RESULTS_DIR = "results_dir"
 SETTING_OPEN_FOLDER_PROMPT = "open_folder_prompt"
+SETTING_RUN_METADATA_DEFAULTS = "run_metadata_defaults"

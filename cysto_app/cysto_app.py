@@ -101,6 +101,52 @@ def load_processed_qss(path):
         return ""
 
 
+def build_spinbox_arrow_qss():
+    arrow_up = resource_path("ui", "icons", "arrow-up.svg").replace("\\", "/")
+    arrow_down = resource_path("ui", "icons", "arrow-down.svg").replace("\\", "/")
+    return f"""
+QSpinBox, QDoubleSpinBox {{
+    padding-right: 18px;
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button {{
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 18px;
+    background-color: #666666;
+    border-left: 1px solid #777777;
+    border-bottom: 1px solid #6F6F6F;
+    border-top-right-radius: 4px;
+}}
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 18px;
+    background-color: #666666;
+    border-left: 1px solid #777777;
+    border-top: 1px solid #6F6F6F;
+    border-bottom-right-radius: 4px;
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: #6B6B6B;
+}}
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+    image: url("{arrow_up}");
+    width: 10px;
+    height: 10px;
+}}
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+    image: url("{arrow_down}");
+    width: 10px;
+    height: 10px;
+}}
+QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled,
+QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled {{
+    background-color: #525252;
+}}
+"""
+
+
 def main_app_entry():
     try:
         qt_info = configure_qt_runtime_environment(repair_hidden=True)
@@ -172,7 +218,7 @@ def main_app_entry():
     if os.path.exists(style_path):
         try:
             with open(style_path, "r") as f:
-                app.setStyleSheet(f.read())
+                app.setStyleSheet(f.read() + build_spinbox_arrow_qss())
             log.info(f"Applied stylesheet from: {style_path}")
         except Exception as e:
             log.warning(

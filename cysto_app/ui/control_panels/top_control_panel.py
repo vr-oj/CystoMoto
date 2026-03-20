@@ -33,15 +33,13 @@ class TopControlPanel(QWidget):
         self.conn_lbl.setStyleSheet("font-weight:bold;color:#D6C832;")
         status_layout.addRow("Connection:", self.conn_lbl)
 
-        self.idx_lbl = QLabel("N/A")
-        status_layout.addRow("Device Frame #:", self.idx_lbl)
-
-        self.time_lbl = QLabel("N/A")
-        status_layout.addRow("Device Time (s):", self.time_lbl)
-
         self.pres_lbl = QLabel("N/A")
         self.pres_lbl.setStyleSheet("font-size:12pt;font-weight:bold;")
         status_layout.addRow("Current Pressure:", self.pres_lbl)
+
+        self.mass_lbl = QLabel("N/A")
+        self.mass_lbl.setStyleSheet("font-size:12pt;font-weight:bold;")
+        status_layout.addRow("Current Mass:", self.mass_lbl)
 
         self.zero_btn = QPushButton("Zero Device?")
         self.zero_btn.setEnabled(False)
@@ -60,9 +58,15 @@ class TopControlPanel(QWidget):
             color = "#D6C832"
         self.conn_lbl.setStyleSheet(f"font-weight:bold;color:{color};")
         self.zero_btn.setEnabled(connected)
+        if not connected:
+            self.clear_device_data()
 
-    def update_device_data(self, idx: int, t_dev: float, p_dev: float):
-        """Update the frame index, device time, and pressure readout."""
-        self.idx_lbl.setText(str(idx))
-        self.time_lbl.setText(f"{t_dev:.2f}")
+    def clear_device_data(self):
+        """Clear live device readouts when no current device data is available."""
+        self.pres_lbl.setText("N/A")
+        self.mass_lbl.setText("N/A")
+
+    def update_device_data(self, p_dev: float, mass_dev: float):
+        """Update the live pressure and mass readouts."""
         self.pres_lbl.setText(f"{p_dev:.2f} mmHg")
+        self.mass_lbl.setText(f"{mass_dev:.2f} g")

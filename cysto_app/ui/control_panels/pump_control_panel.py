@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QPushButton,
 )
 from PyQt5.QtCore import pyqtSignal
@@ -16,7 +17,7 @@ class PumpControlPanel(QGroupBox):
 
     Recording and pump are independent:
       - Connect         → "Start Recording" and "Start Fill" become available.
-      - Start Recording → CSV + plot begin; does not affect pump state.
+      - Start Recording → creates a new file, opens the run setup dialog, then starts CSV + plot capture.
       - Stop Recording  → CSV + plot stop; does not affect pump state.
       - Start Fill      → sends start command to Arduino only.
       - Stop Pump       → sends stop command to Arduino only.
@@ -37,16 +38,27 @@ class PumpControlPanel(QGroupBox):
         # ── Recording row (first step) ────────────────────────────────────────
         self.rec_start_btn = QPushButton("⏺ Start Recording")
         self.rec_start_btn.setEnabled(False)
+        self.rec_start_btn.setToolTip(
+            "Start a new recording. This creates a new file and opens the run setup dialog for save location and metadata."
+        )
         self.rec_start_btn.clicked.connect(self.record_start_requested.emit)
 
         self.rec_stop_btn = QPushButton("⏹ Stop Recording")
         self.rec_stop_btn.setEnabled(False)
+        self.rec_stop_btn.setToolTip("Stop the current recording and close its CSV file.")
         self.rec_stop_btn.clicked.connect(self.record_stop_requested.emit)
 
         rec_row = QHBoxLayout()
         rec_row.addWidget(self.rec_start_btn)
         rec_row.addWidget(self.rec_stop_btn)
         layout.addRow("Recording:", rec_row)
+
+        self.rec_hint_lbl = QLabel(
+            "Starting a recording creates a new file and opens the run setup dialog."
+        )
+        self.rec_hint_lbl.setWordWrap(True)
+        self.rec_hint_lbl.setStyleSheet("color:#9AA3AE;font-size:10px;")
+        layout.addRow("", self.rec_hint_lbl)
 
         # ── Pump row (available only while recording is active) ───────────────
         self.start_btn = QPushButton("Start Pump")

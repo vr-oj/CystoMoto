@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QScrollBar,
 )
-from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtCore import QEvent, QPointF, Qt, QSignalBlocker, pyqtSignal, pyqtSlot
 
 from utils.config import (
     PLOT_DEFAULT_Y_MIN,
@@ -48,12 +48,14 @@ else:
         Matplotlib is kept for high-quality image export only.
         """
 
+        manual_x_mode_requested = pyqtSignal()
+
         _STACKED_LAYOUT_KW = {
             "left": 0.06,
             "right": 0.995,
             "top": 0.985,
-            "bottom": 0.08,
-            "hspace": 0.08,
+            "bottom": 0.09,
+            "hspace": 0.03,
         }
         _SIDE_BY_SIDE_LAYOUT_KW = {
             "left": 0.06,
@@ -62,10 +64,17 @@ else:
             "bottom": 0.10,
             "wspace": 0.16,
         }
-        _STACKED_GRID_MARGINS = (44, 8, 8, 16)  # left, top, right, bottom
+        _STACKED_GRID_MARGINS = (44, 8, 8, 12)  # left, top, right, bottom
         _SIDE_BY_SIDE_GRID_MARGINS = (44, 8, 8, 20)
-        _LEFT_AXIS_WIDTH = 54
-        _BOTTOM_AXIS_HEIGHT = 36
+        _LEFT_AXIS_WIDTH = 60
+        _BOTTOM_AXIS_HEIGHT = 50
+        _STACKED_AXIS_HEIGHT = 38
+        _HOVER_DISTANCE_PX = 22.0
+        _AXIS_TITLE_STYLE = {
+            "color": "#111111",
+            "font-size": "14pt",
+            "font-weight": "700",
+        }
 
         def __init__(self, parent=None):
             super().__init__(parent)
@@ -78,6 +87,7 @@ else:
 
             self.graphics = pg.GraphicsLayoutWidget(self)
             self.graphics.setBackground("w")
+            self.graphics.viewport().installEventFilter(self)
             outer_layout.addWidget(self.graphics)
 
             # Scrollbar kept for API compatibility/manual pan mode.
@@ -85,6 +95,40 @@ else:
             self.scrollbar.hide()
             outer_layout.addWidget(self.scrollbar)
             self.scrollbar.valueChanged.connect(self._on_scroll)
+            self.scrollbar.setStyleSheet(
+                """
+                QScrollBar:horizontal {
+                    border: 1px solid #C0C0C0;
+                    background: #F0F0F0;
+                    height: 15px;
+                    margin: 0px 20px 0 20px;
+                }
+                QScrollBar::handle:horizontal {
+                    background: #A0A0A0;
+                    min-width: 20px;
+                    border-radius: 5px;
+                    border: 1px solid #808080;
+                }
+                QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                    width: 0px; height: 0px; background: none; border: none;
+                }
+                QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+                    background: none;
+                }
+                QScrollBar:horizontal:disabled {
+                    border: 1px solid #B8C0CC;
+                    background: #E5E9F0;
+                    height: 15px;
+                    margin: 0px 20px 0 20px;
+                }
+                QScrollBar::handle:horizontal:disabled {
+                    background: #C7D0DB;
+                    min-width: 20px;
+                    border-radius: 5px;
+                    border: 1px solid #A7B1BE;
+                }
+            """
+            )
 
             # Data storage
             self.times = []
@@ -94,8 +138,10 @@ else:
             self.manual_ylim_pressure = (PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
             self.manual_ylim_mass = (PLOT_DEFAULT_MASS_Y_MIN, PLOT_DEFAULT_MASS_Y_MAX)
             self.window_duration = 60
-            self.max_points = max(int(PLOT_MAX_POINTS), 200)
-            self._trim_chunk = max(50, self.max_points // 8)
+            self.max_points = max(int(PLOT_MAX_POINTS), 0)
+            self._trim_chunk = max(50, self.max_points // 8) if self.max_points else 0
+            self._manual_x_override = False
+            self._setting_view_range = False
 
             # Pump markers
             self._pump_marker_data = []  # list[(t: float, running: bool)]
@@ -140,6 +186,9 @@ else:
                 [], [], pen=pg.mkPen("#111111", width=2)
             )
             self.line_mass = self.ax_mass.plot([], [], pen=pg.mkPen("#5E81AC", width=2))
+            for line in (self.line_pressure, self.line_mass):
+                line.setClipToView(True)
+                line.setDownsampling(auto=True, method="peak")
 
             self.placeholder = pg.TextItem(
                 self._placeholder_text,
@@ -151,12 +200,24 @@ else:
             self.placeholder.setZValue(10)
             self.ax_pressure.addItem(self.placeholder, ignoreBounds=True)
 
-            self.hover_pressure = pg.TextItem("", color=(0, 0, 0), anchor=(0, 1))
+            self.hover_pressure = pg.TextItem(
+                "",
+                color=(20, 24, 28),
+                anchor=(0, 1),
+                fill=pg.mkBrush(255, 255, 255, 235),
+                border=pg.mkPen("#AAB3C2", width=1),
+            )
             self.hover_pressure.setZValue(11)
             self.hover_pressure.hide()
             self.ax_pressure.addItem(self.hover_pressure, ignoreBounds=True)
 
-            self.hover_mass = pg.TextItem("", color=(0, 0, 0), anchor=(0, 1))
+            self.hover_mass = pg.TextItem(
+                "",
+                color=(20, 24, 28),
+                anchor=(0, 1),
+                fill=pg.mkBrush(255, 255, 255, 235),
+                border=pg.mkPen("#AAB3C2", width=1),
+            )
             self.hover_mass.setZValue(11)
             self.hover_mass.hide()
             self.ax_mass.addItem(self.hover_mass, ignoreBounds=True)
@@ -178,7 +239,7 @@ else:
             if mode == "stacked":
                 lay.setContentsMargins(*self._STACKED_GRID_MARGINS)
                 lay.setHorizontalSpacing(0)
-                lay.setVerticalSpacing(8)
+                lay.setVerticalSpacing(2)
                 lay.setColumnStretchFactor(0, 1)
                 lay.setRowStretchFactor(0, 1)
                 lay.setRowStretchFactor(1, 1)
@@ -191,8 +252,6 @@ else:
                 lay.setColumnStretchFactor(1, 1)
 
         def _style_axes(self, mode: str):
-            label_style = {"color": "#111111", "font-size": "12pt", "font-weight": "600"}
-
             for ax in (self.ax_pressure, self.ax_mass):
                 ax.showGrid(x=True, y=True, alpha=0.25)
                 ax.getViewBox().setDefaultPadding(0.0)
@@ -206,36 +265,44 @@ else:
                     axis = ax.getAxis(axis_name)
                     axis.setTextPen(pg.mkPen("#333333"))
                     axis.setPen(pg.mkPen("#D8DEE9"))
-                    axis.setStyle(tickTextOffset=8, autoExpandTextSpace=False)
+                    axis.setStyle(tickTextOffset=6, autoExpandTextSpace=False)
 
-            self.ax_pressure.setLabel("left", "Pressure (mmHg)", **label_style)
-            self.ax_mass.setLabel("left", "Mass (g)", **label_style)
+            self.ax_pressure.setLabel("left", "Pressure (mmHg)", **self._AXIS_TITLE_STYLE)
+            self.ax_mass.setLabel("left", "Mass (g)", **self._AXIS_TITLE_STYLE)
 
             if mode == "stacked":
                 self.ax_pressure.showAxis("bottom")
                 self.ax_mass.showAxis("bottom")
                 self.ax_pressure.getAxis("bottom").setStyle(showValues=False)
-                self.ax_pressure.setLabel("bottom", " ", **label_style)
-                self.ax_mass.setLabel("bottom", "Time (s)", **label_style)
+                self.ax_mass.setLabel("bottom", "Time (s)", **self._AXIS_TITLE_STYLE)
             else:
                 self.ax_pressure.showAxis("bottom")
                 self.ax_mass.showAxis("bottom")
                 self.ax_pressure.getAxis("bottom").setStyle(showValues=True)
                 self.ax_mass.getAxis("bottom").setStyle(showValues=True)
-                self.ax_pressure.setLabel("bottom", "Time (s)", **label_style)
-                self.ax_mass.setLabel("bottom", "Time (s)", **label_style)
+                self.ax_pressure.setLabel("bottom", "Time (s)", **self._AXIS_TITLE_STYLE)
+                self.ax_mass.setLabel("bottom", "Time (s)", **self._AXIS_TITLE_STYLE)
 
             # Lock axis geometry so plot view boxes remain exactly matched.
-            for ax in (self.ax_pressure, self.ax_mass):
-                ax.getAxis("left").setWidth(self._LEFT_AXIS_WIDTH)
-                ax.getAxis("bottom").setHeight(self._BOTTOM_AXIS_HEIGHT)
+            self.ax_pressure.getAxis("left").setWidth(self._LEFT_AXIS_WIDTH)
+            self.ax_mass.getAxis("left").setWidth(self._LEFT_AXIS_WIDTH)
+            if mode == "stacked":
+                self.ax_pressure.getAxis("bottom").setHeight(self._STACKED_AXIS_HEIGHT)
+                self.ax_mass.getAxis("bottom").setHeight(self._STACKED_AXIS_HEIGHT)
+            else:
+                self.ax_pressure.getAxis("bottom").setHeight(self._BOTTOM_AXIS_HEIGHT)
+                self.ax_mass.getAxis("bottom").setHeight(self._BOTTOM_AXIS_HEIGHT)
 
         def _safe_set_xrange(self, xmin: float, xmax: float):
             if not (math.isfinite(xmin) and math.isfinite(xmax)):
                 return
             if xmin >= xmax:
                 xmax = xmin + 1.0
-            self.ax_pressure.setXRange(xmin, xmax, padding=0.0)
+            self._setting_view_range = True
+            try:
+                self.ax_pressure.setXRange(xmin, xmax, padding=0.0)
+            finally:
+                self._setting_view_range = False
 
         def _safe_set_yrange(self, ax, ymin: float, ymax: float):
             if not (math.isfinite(ymin) and math.isfinite(ymax)):
@@ -247,6 +314,14 @@ else:
         def _sorted_range(self, v0, v1):
             return (v0, v1) if v0 <= v1 else (v1, v0)
 
+        def _compute_live_window_xlim(self):
+            if self.times:
+                t_latest = self.times[-1]
+                xmax = max(t_latest, float(self.window_duration))
+                xmin = max(0.0, xmax - self.window_duration)
+                return xmin, xmax
+            return (0.0, float(self.window_duration))
+
         def _apply_view_ranges(self, auto_x, auto_y_pressure, auto_y_mass, force_redraw=False):
             self.line_pressure.setData(self.times, self.pressures)
             self.line_mass.setData(self.times, self.masses)
@@ -254,28 +329,24 @@ else:
             # X-range (shared via XLink)
             if auto_x:
                 self.manual_xlim = None
-                self.scrollbar.hide()
                 if len(self.times) > 1:
                     start, end = self.times[0], self.times[-1]
                     pad = max(1.0, (end - start) * 0.05)
-                    xmin = start - pad * 0.1
-                    xmax = end + pad * 0.9
+                    xmin = min(0.0, start)
+                    xmax = end + pad * 0.6
                     self._safe_set_xrange(xmin, xmax)
                 elif self.times:
                     t0 = self.times[-1]
-                    self._safe_set_xrange(t0 - 0.5, t0 + 0.5)
+                    self._safe_set_xrange(min(0.0, t0), t0 + 0.5)
+                self._update_scrollbar()
             else:
-                if self.manual_xlim:
+                if self._manual_x_override and self.manual_xlim:
                     xmin, xmax = self.manual_xlim
-                elif self.times:
-                    t_latest = self.times[-1]
-                    xmax = max(t_latest, float(self.window_duration))
-                    xmin = max(0.0, xmax - self.window_duration)
-                    self.manual_xlim = (xmin, xmax)
                 else:
-                    xmin, xmax = (0.0, 100.0)
+                    xmin, xmax = self._compute_live_window_xlim()
+                    self.manual_xlim = (xmin, xmax)
                 self._safe_set_xrange(xmin, xmax)
-                self.scrollbar.hide()
+                self._update_scrollbar()
 
             # Pressure Y-range
             if auto_y_pressure:
@@ -339,6 +410,10 @@ else:
         # ── Placeholder + hover ────────────────────────────────────────────────
 
         def _on_pressure_range_changed(self, *_):
+            if not self._auto_x_enabled:
+                x0, x1 = self._sorted_range(*self.ax_pressure.viewRange()[0])
+                self.manual_xlim = (x0, x1)
+                self._update_scrollbar()
             self._reposition_placeholder()
             self._reposition_marker_labels(pressure=True)
 
@@ -360,12 +435,47 @@ else:
                 self.placeholder.setText(text)
                 self.placeholder.show()
                 self._reposition_placeholder()
-                self.hover_pressure.hide()
-                self.hover_mass.hide()
+                self._hide_hover_items()
             else:
                 self.placeholder.hide()
             if redraw:
                 self.graphics.viewport().update()
+
+        def _hide_hover_items(self, redraw: bool = False):
+            changed = False
+            if self.hover_pressure.isVisible():
+                self.hover_pressure.hide()
+                changed = True
+            if self.hover_mass.isVisible():
+                self.hover_mass.hide()
+                changed = True
+            if redraw and changed:
+                self.graphics.viewport().update()
+
+        def _hover_anchor_and_pos(self, ax, t: float, v: float):
+            (x0, x1), (y0, y1) = ax.viewRange()
+            dx = max((x1 - x0) * 0.015, 0.25)
+            dy = max((y1 - y0) * 0.035, 0.25)
+
+            anchor_x = 0.0
+            x_pos = t + dx
+            if t > x0 + 0.78 * (x1 - x0):
+                anchor_x = 1.0
+                x_pos = t - dx
+
+            anchor_y = 1.0
+            y_pos = v + dy
+            if v > y0 + 0.82 * (y1 - y0):
+                anchor_y = 0.0
+                y_pos = v - dy
+
+            return (anchor_x, anchor_y), x_pos, y_pos
+
+        def _is_cursor_near_point(self, vb, scene_pos, t: float, v: float) -> bool:
+            point_scene = vb.mapViewToScene(QPointF(t, v))
+            dx = point_scene.x() - scene_pos.x()
+            dy = point_scene.y() - scene_pos.y()
+            return (dx * dx + dy * dy) <= (self._HOVER_DISTANCE_PX ** 2)
 
         def _find_nearest(self, x_coord):
             if not self.times:
@@ -383,10 +493,7 @@ else:
 
         def _on_mouse_moved(self, evt):
             if not self.times or self.placeholder.isVisible():
-                if self.hover_pressure.isVisible():
-                    self.hover_pressure.hide()
-                if self.hover_mass.isVisible():
-                    self.hover_mass.hide()
+                self._hide_hover_items()
                 return
 
             pos = evt[0]
@@ -402,26 +509,42 @@ else:
                     hover.hide()
                     return
                 v = values[idx]
-                hover.setText(fmt.format(t=t, v=v))
-                hover.setPos(t, v)
+                if not self._is_cursor_near_point(vb, pos, t, v):
+                    hover.hide()
+                    return
+                hover.setPlainText(fmt.format(t=t, v=v))
+                anchor, x_pos, y_pos = self._hover_anchor_and_pos(ax, t, v)
+                hover.setAnchor(anchor)
+                hover.setPos(x_pos, y_pos)
                 hover.show()
 
             _update_hover(
                 self.ax_pressure,
                 self.hover_pressure,
                 self.pressures,
-                "Time: {t:.2f} s\nPressure: {v:.2f} mmHg",
+                "{t:.2f} s\n{v:.2f} mmHg",
             )
             _update_hover(
                 self.ax_mass,
                 self.hover_mass,
                 self.masses,
-                "Time: {t:.2f} s\nMass: {v:.2f} g",
+                "{t:.2f} s\n{v:.2f} g",
             )
+
+        def eventFilter(self, obj, event):
+            if obj is self.graphics.viewport() and event.type() in (QEvent.Leave, QEvent.Hide):
+                self._hide_hover_items(redraw=True)
+            return super().eventFilter(obj, event)
+
+        def leaveEvent(self, event):
+            self._hide_hover_items(redraw=True)
+            super().leaveEvent(event)
 
         # ── Plot update ────────────────────────────────────────────────────────
 
         def _trim_history_if_needed(self):
+            if self.max_points <= 0:
+                return
             max_allowed = self.max_points + self._trim_chunk
             if len(self.times) <= max_allowed:
                 return
@@ -482,6 +605,7 @@ else:
 
         def set_manual_x_limits(self, xmin, xmax):
             if xmin < xmax and math.isfinite(xmin) and math.isfinite(xmax):
+                self._manual_x_override = True
                 self.manual_xlim = (xmin, xmax)
                 self._safe_set_xrange(xmin, xmax)
                 self._update_scrollbar()
@@ -504,6 +628,12 @@ else:
 
         def set_auto_scale_x(self, enabled: bool):
             self._auto_x_enabled = bool(enabled)
+            if enabled:
+                self.manual_xlim = None
+                self._manual_x_override = False
+            else:
+                if not self._manual_x_override:
+                    self.manual_xlim = None
             if self.times:
                 self._refresh_plot_view(
                     self._auto_x_enabled,
@@ -547,6 +677,7 @@ else:
 
         def reset_zoom(self, auto_x, auto_y_pressure, auto_y_mass):
             self.manual_xlim = None
+            self._manual_x_override = False
             if auto_x:
                 self.scrollbar.hide()
 
@@ -566,7 +697,7 @@ else:
                 self._update_placeholder(None, redraw=False)
                 self._refresh_plot_view(auto_x, auto_y_pressure, auto_y_mass, force_redraw=True)
             else:
-                self._safe_set_xrange(0.0, 100.0)
+                self._safe_set_xrange(0.0, float(self.window_duration))
                 if not auto_y_pressure:
                     self._safe_set_yrange(self.ax_pressure, PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
                 if not auto_y_mass:
@@ -579,17 +710,101 @@ else:
 
         # ── Scrollbar ──────────────────────────────────────────────────────────
 
+        def _scrollbar_position(self):
+            if not self.times:
+                return None
+
+            if self._auto_x_enabled or not self.manual_xlim:
+                xmax = self.times[-1]
+                xmin = max(0.0, xmax - self.window_duration)
+            else:
+                xmin, xmax = self.manual_xlim
+
+            idx0 = bisect.bisect_left(self.times, xmin)
+            idx1 = bisect.bisect_right(self.times, xmax)
+            return idx0, idx1
+
         def _update_scrollbar(self):
-            # Hidden by default in live mode; retained for compatibility.
-            self.scrollbar.hide()
+            if not self.times:
+                self.scrollbar.hide()
+                return
+
+            pos = self._scrollbar_position()
+            if pos is None:
+                self.scrollbar.hide()
+                return
+
+            idx0, idx1 = pos
+            window_size = max(idx1 - idx0, 1)
+            full_len = len(self.times)
+            if full_len <= window_size:
+                if self._auto_x_enabled and full_len > 1:
+                    window_size = max(1, full_len // 2)
+                    idx0 = max(0, full_len - window_size)
+                else:
+                    with QSignalBlocker(self.scrollbar):
+                        self.scrollbar.setMinimum(0)
+                        self.scrollbar.setMaximum(1)
+                        self.scrollbar.setPageStep(1)
+                        self.scrollbar.setSingleStep(1)
+                        self.scrollbar.setValue(0)
+                    self.scrollbar.setEnabled(False)
+                    self.scrollbar.show()
+                    return
+
+            with QSignalBlocker(self.scrollbar):
+                self.scrollbar.setMinimum(0)
+                self.scrollbar.setMaximum(max(full_len - window_size, 0))
+                self.scrollbar.setPageStep(window_size)
+                self.scrollbar.setSingleStep(max(window_size // 10, 1))
+                self.scrollbar.setValue(idx0)
+            self.scrollbar.setEnabled(True)
+            self.scrollbar.show()
 
         @pyqtSlot(int)
-        def _on_scroll(self, _pos):
-            # Manual scroll support intentionally disabled in current UX.
-            return
+        def _on_scroll(self, pos):
+            if not self.times or len(self.times) <= 1:
+                return
+
+            window_indices = self.scrollbar.pageStep()
+            start_idx = max(0, pos)
+            end_idx = min(start_idx + window_indices - 1, len(self.times) - 1)
+            if start_idx >= end_idx and len(self.times) > 1:
+                start_idx = max(0, len(self.times) - 2)
+                end_idx = len(self.times) - 1
+
+            xmin_new = self.times[start_idx]
+            xmax_new = self.times[end_idx]
+            if xmin_new == xmax_new and len(self.times) > 1:
+                if end_idx + 1 < len(self.times):
+                    xmax_new = self.times[end_idx + 1]
+                elif start_idx - 1 >= 0:
+                    xmin_new = self.times[start_idx - 1]
+                else:
+                    xmax_new = xmin_new + 1.0
+
+            if self._auto_x_enabled:
+                self._auto_x_enabled = False
+                self.manual_x_mode_requested.emit()
+
+            self._manual_x_override = True
+            self.manual_xlim = (xmin_new, xmax_new)
+            self._safe_set_xrange(xmin_new, xmax_new)
+            self._update_scrollbar()
 
         def set_window_duration(self, seconds: int):
             self.window_duration = seconds
+            if (
+                self.times
+                and not self._auto_x_enabled
+                and not self._manual_x_override
+            ):
+                self._refresh_plot_view(
+                    self._auto_x_enabled,
+                    self._auto_y_pressure_enabled,
+                    self._auto_y_mass_enabled,
+                    force_redraw=True,
+                )
 
         # ── Pump markers ───────────────────────────────────────────────────────
 
@@ -679,12 +894,15 @@ else:
             self.times.clear()
             self.pressures.clear()
             self.masses.clear()
+            self.manual_xlim = None
+            self._manual_x_override = False
+            self.scrollbar.hide()
             self._clear_pump_markers()
             self._pump_marker_data.clear()
 
             self.line_pressure.setData([], [])
             self.line_mass.setData([], [])
-            self._safe_set_xrange(0.0, 100.0)
+            self._safe_set_xrange(0.0, float(self.window_duration))
 
             ylim_p = self.manual_ylim_pressure
             if ylim_p and isinstance(ylim_p, tuple) and all(math.isfinite(v) for v in ylim_p):
@@ -738,13 +956,13 @@ else:
             if self._layout_mode == "stacked":
                 for lbl in ax_pressure.get_xticklabels():
                     lbl.set_visible(False)
-                ax_mass.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
+                ax_mass.set_xlabel("Time (s)", fontsize=15, fontweight="bold")
             else:
-                ax_pressure.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
-                ax_mass.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
+                ax_pressure.set_xlabel("Time (s)", fontsize=15, fontweight="bold")
+                ax_mass.set_xlabel("Time (s)", fontsize=15, fontweight="bold")
 
-            ax_pressure.set_ylabel("Pressure (mmHg)", fontsize=13, fontweight="bold")
-            ax_mass.set_ylabel("Mass (g)", fontsize=13, fontweight="bold")
+            ax_pressure.set_ylabel("Pressure (mmHg)", fontsize=15, fontweight="bold")
+            ax_mass.set_ylabel("Mass (g)", fontsize=15, fontweight="bold")
 
             ax_pressure.plot(self.times, self.pressures, "-", lw=2, color="black")
             ax_mass.plot(self.times, self.masses, "-", lw=2, color="#5E81AC")

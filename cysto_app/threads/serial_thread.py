@@ -1,214 +1,304 @@
 # cysto_app/threads/serial_thread.py
 
-import csv
-import math
-import time
-import serial
-import os
 import logging
-from PyQt5.QtCore import QThread, pyqtSignal, QMutex, QWaitCondition
+import math
 import queue
+import time
+
+import serial
+from PyQt5.QtCore import QMutex, QThread, QWaitCondition, pyqtSignal
+
+from utils.utils import is_virtual_port
 
 log = logging.getLogger(__name__)
 
 # How many seconds of silence on the serial port we interpret
-# as “Arduino has stopped streaming.” You can tune this if needed.
+# as "Arduino has stopped streaming." You can tune this if needed.
 IDLE_TIMEOUT_S = 2.0
+
+# Virtual CystoMoto simulator timing and shape parameters.
+VIRTUAL_SAMPLE_INTERVAL_S = 0.05
+VIRTUAL_FILL_RATE_G_PER_S = 0.85
+VIRTUAL_CONTRACTION_PERIOD_S = 18.0
+VIRTUAL_CONTRACTION_DURATION_S = 3.5
 
 
 class SerialThread(QThread):
     data_ready = pyqtSignal(int, float, float, float)  # (frameIndex, timestamp_s, pressure, mass)
     error_occurred = pyqtSignal(str)  # For reporting errors back to the GUI
     status_changed = pyqtSignal(str)  # For general status updates
-    device_event = pyqtSignal(str)   # Non-CSV status messages from the Arduino (e.g. "STARTED")
+    device_event = pyqtSignal(str)  # Non-CSV status messages from the Arduino (e.g. "STARTED")
 
     def __init__(self, port=None, baud=115200, test_csv=None, parent=None):
         super().__init__(parent)
         self.port = port
         self.baud = baud
         self.ser = None
+        self._virtual_mode = is_virtual_port(port)
 
         # Control flags
         self.running = False
-        self._got_first_packet = False  # Have we seen at least one valid line?
-        self._last_data_time = None  # Timestamp (time.time()) of last valid packet
+        self._got_first_packet = False
+        self._last_data_time = None
         self._stop_requested = False
 
-
-        # For sending commands (not used here, but kept for future)
+        # For sending commands from the GUI thread.
         self.command_queue = queue.Queue()
         self.mutex = QMutex()
         self.wait_condition = QWaitCondition()
 
-    def run(self):
-        """Main loop for reading from the CystoMoto device.
+        # Virtual device state
+        self._virtual_frame_idx = 0
+        self._virtual_stream_started_s = 0.0
+        self._virtual_last_sample_s = 0.0
+        self._virtual_mass_raw_g = 0.0
+        self._virtual_mass_zero_g = 0.0
+        self._virtual_pressure_zero_mmhg = 0.0
+        self._virtual_pump_running = False
 
-        Opens the serial port and emits ``data_ready`` for each valid packet.
-        If no data arrives for ``IDLE_TIMEOUT_S`` seconds after the first
-        packet, the thread shuts down. Reports an error and exits immediately
-        if no port is specified.
-        """
+    def run(self):
+        """Main loop for reading from the CystoMoto device."""
         self.running = True
         self._got_first_packet = False
         self._last_data_time = None
+        self._stop_requested = False
 
         if not self.port:
             self.error_occurred.emit("No serial port specified")
             self.running = False
             return
 
-        # 1) Attempt to open the real serial port
+        try:
+            if self._virtual_mode:
+                self._run_virtual_device()
+            else:
+                self._run_serial_device()
+        finally:
+            if self.ser:
+                try:
+                    self.ser.close()
+                    log.info("Closed serial port %s", self.port)
+                except Exception as e:
+                    log.exception("Error closing serial port %s: %s", self.port, e)
+
+            self.status_changed.emit("Disconnected")
+            self.running = False
+            log.info("SerialThread finished.")
+
+    def _run_serial_device(self):
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=1)
-            log.info(f"Opened serial port {self.port} @ {self.baud} baud")
+            log.info("Opened serial port %s @ %s baud", self.port, self.baud)
             self.status_changed.emit(f"Connected to {self.port}")
         except Exception as e:
-            log.warning(f"Failed to open serial port {self.port}: {e}")
+            log.warning("Failed to open serial port %s: %s", self.port, e)
             self.error_occurred.emit(f"Error opening serial: {e}")
             self.ser = None
 
-        # 2) Main loop
         while self.running and not self._stop_requested:
-            # 2a) Process any outgoing commands
+            self._process_pending_commands()
+
+            if self.ser is None:
+                try:
+                    self.ser = serial.Serial(self.port, self.baud, timeout=1)
+                    log.info("[SerialThread] Reconnected to %s", self.port)
+                    self.status_changed.emit(f"Reconnected to {self.port}")
+                except Exception as e_op:
+                    log.debug("[SerialThread] Reopen failed: %s; retrying in 0.1 s", e_op)
+                    self.msleep(100)
+                continue
+
+            try:
+                if self.ser.in_waiting > 0:
+                    raw = self.ser.readline()
+                    if raw:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                        log.debug("Raw serial data: %s", line)
+                        self._handle_incoming_line(line)
+                else:
+                    self.msleep(10)
+
+            except serial.SerialException as se:
+                log.error("[SerialThread] SerialException: %s; will attempt reconnect", se)
+                self.status_changed.emit("Serial disconnected, retrying...")
+                try:
+                    self.ser.close()
+                except Exception:
+                    pass
+                self.ser = None
+                t0 = time.time()
+                while (
+                    self.running
+                    and not self._stop_requested
+                    and (time.time() - t0) < 1.0
+                ):
+                    self.msleep(50)
+                continue
+
+            except Exception as e:
+                log.exception("[SerialThread] Unexpected error in read loop: %s", e)
+                self.msleep(100)
+
+            if (
+                self._got_first_packet
+                and self._last_data_time is not None
+                and (time.time() - self._last_data_time) > IDLE_TIMEOUT_S
+            ):
+                msg = f"No data from Arduino for {time.time() - self._last_data_time:.1f}s"
+                log.error("[SerialThread] %s", msg)
+                self.error_occurred.emit(msg)
+                self._stop_requested = True
+
+    def _run_virtual_device(self):
+        self._reset_virtual_state()
+        self.status_changed.emit("Connected to Virtual CystoMoto (simulated)")
+
+        next_sample_s = time.monotonic()
+        while self.running and not self._stop_requested:
+            self._process_pending_commands()
+
+            now_s = time.monotonic()
+            if now_s >= next_sample_s:
+                idx, elapsed_s, pressure_mmhg, mass_g = self._build_virtual_sample(now_s)
+                self.data_ready.emit(idx, elapsed_s, pressure_mmhg, mass_g)
+                self._got_first_packet = True
+                self._last_data_time = time.time()
+
+                next_sample_s += VIRTUAL_SAMPLE_INTERVAL_S
+                if now_s - next_sample_s > VIRTUAL_SAMPLE_INTERVAL_S:
+                    next_sample_s = now_s + VIRTUAL_SAMPLE_INTERVAL_S
+                continue
+
+            sleep_s = min(VIRTUAL_SAMPLE_INTERVAL_S, max(0.001, next_sample_s - now_s))
+            self.msleep(max(1, int(sleep_s * 1000)))
+
+    def _process_pending_commands(self):
+        while True:
             try:
                 cmd = self.command_queue.get_nowait()
-                if self.ser and cmd:
-                    self.ser.write(cmd)
-                    log.debug(f"Sent command over serial: {cmd}")
             except queue.Empty:
-                pass
+                return
+
+            try:
+                if self._virtual_mode:
+                    self._handle_virtual_command(cmd)
+                elif self.ser and cmd:
+                    payload = cmd.encode("utf-8") + b"\n"
+                    self.ser.write(payload)
+                    log.debug("Sent command over serial: %s", cmd)
             except Exception as e:
-                log.error(f"Error sending serial command: {e}")
+                log.error("Error sending serial command: %s", e)
                 self.error_occurred.emit(f"Serial send error: {e}")
 
-            # 2b) If we have a real port configured, handle live reading+reconnect
-            if self.port:
-                # 2b-i) If `ser` is None, attempt to reopen once per loop iteration
-                if self.ser is None:
-                    try:
-                        self.ser = serial.Serial(self.port, self.baud, timeout=1)
-                        log.info(f"[SerialThread] Reconnected to {self.port}")
-                        self.status_changed.emit(f"Reconnected to {self.port}")
-                    except Exception as e_op:
-                        # Still cannot open; sleep a bit before retrying
-                        log.debug(
-                            f"[SerialThread] Reopen failed: {e_op} → retrying in 0.1 s"
-                        )
-                        self.msleep(100)
-                    continue
+    def _handle_incoming_line(self, line: str):
+        parts = [fld.strip() for fld in line.split(",")]
+        if len(parts) < 3:
+            log.info("Device event: %s", line)
+            self.device_event.emit(line)
+            return
 
-                # 2b-ii) Now `self.ser` is not None → attempt to read lines
-                try:
-                    if self.ser.in_waiting > 0:
-                        raw = self.ser.readline()
-                        if raw:
-                            line = raw.decode("utf-8", errors="replace").strip()
-                            log.debug("Raw serial data: %s", line)
+        try:
+            frame_idx_device = int(parts[0])
+            t_device = float(parts[1])
+            pressure = float(parts[2])
+            mass = float(parts[3]) if len(parts) >= 4 else 0.0
+        except ValueError as ve:
+            log.error("Parse error for line '%s': %s", line, ve)
+            return
 
-                            parts = [fld.strip() for fld in line.split(",")]
-                            if len(parts) < 3:
-                                # Not a data packet — treat as a status event from the device
-                                log.info(f"Device event: {line}")
-                                self.device_event.emit(line)
-                            else:
-                                try:
-                                    frame_idx_device = int(parts[0])
-                                    t_device = float(parts[1])
-                                    p = float(parts[2])
-                                    mass = float(parts[3]) if len(parts) >= 4 else 0.0
-                                except ValueError as ve:
-                                    log.error("Parse error for line '%s': %s", line, ve)
-                                else:
-                                    # Valid packet → emit signal
-                                    self.data_ready.emit(frame_idx_device, t_device, p, mass)
+        self.data_ready.emit(frame_idx_device, t_device, pressure, mass)
+        if not self._got_first_packet:
+            self._got_first_packet = True
+        self._last_data_time = time.time()
 
-                                    # Mark that we've seen at least one packet
-                                    if not self._got_first_packet:
-                                        self._got_first_packet = True
-                                    # Update last-data timestamp
-                                    self._last_data_time = time.time()
-                        else:
-                            # readline timed out without data; will check idle below
-                            pass
-                    else:
-                        # No bytes waiting; sleep briefly
-                        self.msleep(10)
+    def _reset_virtual_state(self):
+        now_s = time.monotonic()
+        self._virtual_frame_idx = 0
+        self._virtual_stream_started_s = now_s
+        self._virtual_last_sample_s = now_s
+        self._virtual_mass_raw_g = 0.0
+        self._virtual_mass_zero_g = 0.0
+        self._virtual_pressure_zero_mmhg = 0.0
+        self._virtual_pump_running = False
 
-                except serial.SerialException as se:
-                    # Port dropped unexpectedly → attempt to reconnect
-                    log.error(
-                        f"[SerialThread] SerialException: {se} → will attempt reconnect"
-                    )
-                    self.status_changed.emit("Serial disconnected, retrying…")
-                    try:
-                        self.ser.close()
-                    except Exception:
-                        pass
-                    self.ser = None
-                    # Wait a short moment before retrying
-                    t0 = time.time()
-                    while (
-                        self.running
-                        and not self._stop_requested
-                        and (time.time() - t0) < 1.0
-                    ):
-                        # Sleep in small increments so we remain responsive
-                        self.msleep(50)
-                    continue
+    def _advance_virtual_state(self, now_s: float):
+        dt = max(0.0, now_s - self._virtual_last_sample_s)
+        if self._virtual_pump_running:
+            self._virtual_mass_raw_g += VIRTUAL_FILL_RATE_G_PER_S * dt
+        self._virtual_last_sample_s = now_s
 
-                except Exception as e:
-                    log.exception(f"[SerialThread] Unexpected error in read loop: {e}")
-                    self.msleep(100)
+    def _build_virtual_sample(self, now_s: float):
+        self._advance_virtual_state(now_s)
+        elapsed_s = max(0.0, now_s - self._virtual_stream_started_s)
+        pressure_raw = self._virtual_pressure_raw(elapsed_s)
+        pressure_mmhg = pressure_raw - self._virtual_pressure_zero_mmhg
+        mass_g = max(0.0, self._virtual_mass_raw_g - self._virtual_mass_zero_g)
 
-                # ---- Idle timeout watchdog ---------------------------------
-                if (
-                    self._got_first_packet
-                    and self._last_data_time is not None
-                    and (time.time() - self._last_data_time) > IDLE_TIMEOUT_S
-                ):
-                    msg = (
-                        f"No data from Arduino for {time.time() - self._last_data_time:.1f}s"
-                    )
-                    log.error(f"[SerialThread] {msg}")
-                    self.error_occurred.emit(msg)
-                    self._stop_requested = True
+        idx = self._virtual_frame_idx
+        self._virtual_frame_idx += 1
+        return idx, elapsed_s, pressure_mmhg, mass_g
 
+    def _virtual_pressure_raw(self, elapsed_s: float) -> float:
+        fill_g = max(0.0, self._virtual_mass_raw_g)
+        baseline = (
+            1.4
+            + 0.30 * math.sin(2.0 * math.pi * 0.18 * elapsed_s)
+            + 0.12 * math.sin(2.0 * math.pi * 1.10 * elapsed_s + 0.7)
+        )
+        filling_load = (0.06 * fill_g) + (0.0015 * fill_g * fill_g)
 
-        # 3) Clean up on exit
-        if self.ser:
-            try:
-                self.ser.close()
-                log.info(f"Closed serial port {self.port}")
-            except Exception as e:
-                log.exception(f"Error closing serial port {self.port}: {e}")
+        phase = elapsed_s % VIRTUAL_CONTRACTION_PERIOD_S
+        contraction = 0.0
+        if phase < VIRTUAL_CONTRACTION_DURATION_S:
+            pulse = math.sin(math.pi * phase / VIRTUAL_CONTRACTION_DURATION_S) ** 2
+            contraction = pulse * (1.5 + min(5.0, 0.05 * fill_g))
 
-        self.status_changed.emit("Disconnected")
-        self.running = False
-        log.info("SerialThread finished.")
+        return baseline + filling_load + contraction
+
+    def _handle_virtual_command(self, cmd: str):
+        command = (cmd or "").strip().upper()
+        if not command:
+            return
+
+        now_s = time.monotonic()
+        self._advance_virtual_state(now_s)
+
+        if command == "G":
+            self._virtual_pump_running = True
+            log.info("Virtual CystoMoto pump started.")
+        elif command == "S":
+            self._virtual_pump_running = False
+            log.info("Virtual CystoMoto pump stopped.")
+        elif command == "Z":
+            elapsed_s = max(0.0, now_s - self._virtual_stream_started_s)
+            self._virtual_pressure_zero_mmhg = self._virtual_pressure_raw(elapsed_s)
+            self._virtual_mass_zero_g = self._virtual_mass_raw_g
+            log.info("Virtual CystoMoto zeroed.")
+        else:
+            log.info("Virtual CystoMoto ignoring unsupported command: %s", command)
 
     def send_command(self, command_str):
         """
-        Queue a command (ASCII + newline) for the Arduino. GUI can call this safely.
+        Queue a command for the Arduino. GUI can call this safely.
         """
         if self.running:
-            final_command = command_str.encode("utf-8") + b"\n"
-            self.command_queue.put(final_command)
-            log.info(f"Queued command: {command_str}")
+            self.command_queue.put(command_str)
+            log.info("Queued command: %s", command_str)
         else:
-            log.warning("Serial thread not running → cannot send command.")
+            log.warning("Serial thread not running; cannot send command.")
             self.error_occurred.emit("Cannot send: Serial disconnected.")
 
     def stop(self):
         """
-        Ask the thread to exit cleanly. If it doesn't within 2 seconds, force‐terminate.
+        Ask the thread to exit cleanly. If it doesn't within 2 seconds, force-terminate.
         """
-        log.info("Stopping SerialThread…")
+        log.info("Stopping SerialThread...")
         self._stop_requested = True
         self.running = False
         self.wait_condition.wakeAll()
         self.quit()
         self.wait(2000)
         if self.isRunning():
-            log.warning("SerialThread did not stop gracefully → terminating.")
+            log.warning("SerialThread did not stop gracefully; terminating.")
             self.terminate()
             self.wait(1000)

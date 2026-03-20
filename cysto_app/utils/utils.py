@@ -3,10 +3,20 @@ import time
 import serial.tools.list_ports
 import re
 
+VIRTUAL_CYSTOMOTO_PORT = "Virtual CystoMoto"
+VIRTUAL_CYSTOMOTO_DESCRIPTION = "Built-in simulator"
 
-def list_serial_ports():
-    """Lists available serial ports."""
-    return [(p.device, p.description) for p in serial.tools.list_ports.comports()]
+
+def is_virtual_port(port) -> bool:
+    return isinstance(port, str) and port == VIRTUAL_CYSTOMOTO_PORT
+
+
+def list_serial_ports(include_virtual: bool = True):
+    """Lists available serial ports and optionally the built-in simulator."""
+    ports = [(p.device, p.description) for p in serial.tools.list_ports.comports()]
+    if include_virtual:
+        ports.append((VIRTUAL_CYSTOMOTO_PORT, VIRTUAL_CYSTOMOTO_DESCRIPTION))
+    return ports
 
 
 def timestamped_filename(prefix, ext):

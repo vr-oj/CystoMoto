@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QScrollBar,
 )
-from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtCore import Qt, QSignalBlocker, pyqtSignal, pyqtSlot
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import matplotlib as mpl
@@ -30,20 +30,24 @@ log = logging.getLogger(__name__)
 
 _HOVER_KW = dict(
     xy=(0, 0),
-    xytext=(15, 15),
+    xytext=(10, 10),
     textcoords="offset points",
-    bbox=dict(boxstyle="round,pad=0.4", fc="wheat", alpha=0.85),
-    arrowprops=dict(arrowstyle="->", connectionstyle="arc3,rad=.2", color="black"),
+    fontsize=9,
+    bbox=dict(boxstyle="round,pad=0.25", fc="#FFFFFF", ec="#AAB3C2", alpha=0.95),
 )
 
 
 class PressurePlotWidget(QWidget):
+    manual_x_mode_requested = pyqtSignal()
+    _HOVER_DISTANCE_PX = 22.0
+    _AXIS_TITLE_FONT_SIZE = 15
+
     _STACKED_LAYOUT_KW = {
         "left": 0.06,
         "right": 0.995,
         "top": 0.985,
-        "bottom": 0.08,
-        "hspace": 0.08,
+        "bottom": 0.09,
+        "hspace": 0.03,
     }
     _SIDE_BY_SIDE_LAYOUT_KW = {
         "left": 0.06,
@@ -104,6 +108,18 @@ class PressurePlotWidget(QWidget):
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
                 background: none;
             }
+            QScrollBar:horizontal:disabled {
+                border: 1px solid #B8C0CC;
+                background: #E5E9F0;
+                height: 15px;
+                margin: 0px 20px 0 20px;
+            }
+            QScrollBar::handle:horizontal:disabled {
+                background: #C7D0DB;
+                min-width: 20px;
+                border-radius: 5px;
+                border: 1px solid #A7B1BE;
+            }
         """
         )
 
@@ -115,8 +131,12 @@ class PressurePlotWidget(QWidget):
         self.manual_ylim_pressure = (PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
         self.manual_ylim_mass = (PLOT_DEFAULT_MASS_Y_MIN, PLOT_DEFAULT_MASS_Y_MAX)
         self.window_duration = 60
-        self.max_points = max(int(PLOT_MAX_POINTS), 200)
-        self._trim_chunk = max(50, self.max_points // 8)
+        self.max_points = max(int(PLOT_MAX_POINTS), 0)
+        self._trim_chunk = max(50, self.max_points // 8) if self.max_points else 0
+        self._manual_x_override = False
+        self._auto_x_enabled = False
+        self._auto_y_pressure_enabled = False
+        self._auto_y_mass_enabled = False
 
         # Pump markers: persistent data survives layout rebuilds; artists do not
         self._pump_marker_data = []  # list of (t: float, running: bool)
@@ -129,6 +149,7 @@ class PressurePlotWidget(QWidget):
         self._rebuild_axes("stacked")
 
         self.canvas.mpl_connect("motion_notify_event", self._on_hover)
+        self.canvas.mpl_connect("figure_leave_event", self._on_figure_leave)
 
     # ── Axes construction ──────────────────────────────────────────────────────
 
@@ -168,14 +189,39 @@ class PressurePlotWidget(QWidget):
             # X labels only on the bottom subplot
             for lbl in self.ax_pressure.get_xticklabels():
                 lbl.set_visible(False)
-            self.ax_mass.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
+            self.ax_pressure.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+            self.ax_mass.set_xlabel(
+                "Time (s)",
+                fontsize=self._AXIS_TITLE_FONT_SIZE,
+                fontweight="bold",
+                labelpad=10,
+            )
         else:
             # Both subplots show their own X label
-            self.ax_pressure.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
-            self.ax_mass.set_xlabel("Time (s)", fontsize=13, fontweight="bold")
+            self.ax_pressure.tick_params(axis="x", which="both", bottom=True, labelbottom=True)
+            self.ax_pressure.set_xlabel(
+                "Time (s)",
+                fontsize=self._AXIS_TITLE_FONT_SIZE,
+                fontweight="bold",
+                labelpad=10,
+            )
+            self.ax_mass.set_xlabel(
+                "Time (s)",
+                fontsize=self._AXIS_TITLE_FONT_SIZE,
+                fontweight="bold",
+                labelpad=10,
+            )
 
-        self.ax_pressure.set_ylabel("Pressure (mmHg)", fontsize=13, fontweight="bold")
-        self.ax_mass.set_ylabel("Mass (g)", fontsize=13, fontweight="bold")
+        self.ax_pressure.set_ylabel(
+            "Pressure (mmHg)",
+            fontsize=self._AXIS_TITLE_FONT_SIZE,
+            fontweight="bold",
+        )
+        self.ax_mass.set_ylabel(
+            "Mass (g)",
+            fontsize=self._AXIS_TITLE_FONT_SIZE,
+            fontweight="bold",
+        )
 
     def _restore_plot_state(self):
         """Recreate lines, limits, annotations and markers after an axes rebuild."""
@@ -233,9 +279,13 @@ class PressurePlotWidget(QWidget):
         self.hover_pressure = self.ax_pressure.annotate("", **_HOVER_KW)
         self.hover_pressure.set_visible(False)
         self.hover_pressure.set_in_layout(False)
+        self.hover_pressure.get_bbox_patch().set_edgecolor("#AAB3C2")
+        self.hover_pressure.get_bbox_patch().set_facecolor("#FFFFFF")
         self.hover_mass = self.ax_mass.annotate("", **_HOVER_KW)
         self.hover_mass.set_visible(False)
         self.hover_mass.set_in_layout(False)
+        self.hover_mass.get_bbox_patch().set_edgecolor("#AAB3C2")
+        self.hover_mass.get_bbox_patch().set_facecolor("#FFFFFF")
 
         # Re-draw pump markers from stored data
         for t, running in self._pump_marker_data:
@@ -256,8 +306,7 @@ class PressurePlotWidget(QWidget):
     def _update_placeholder(self, text=None, redraw=True):
         if text:
             self.line_pressure.set_data([], [])
-            if self.hover_pressure.get_visible():
-                self.hover_pressure.set_visible(False)
+            self._hide_hover_annotations()
             if self.placeholder:
                 self.placeholder.set_text(text)
                 self.placeholder.set_visible(True)
@@ -266,6 +315,32 @@ class PressurePlotWidget(QWidget):
                 self.placeholder.set_visible(False)
         if redraw:
             self.canvas.draw_idle()
+
+    def _hide_hover_annotations(self, redraw: bool = False):
+        changed = False
+        for ann in (self.hover_pressure, self.hover_mass):
+            if ann.get_visible():
+                ann.set_visible(False)
+                changed = True
+        if redraw and changed:
+            self.canvas.draw_idle()
+
+    def _is_cursor_near_point(self, ax, event, t: float, v: float) -> bool:
+        x_px, y_px = ax.transData.transform((t, v))
+        dx = x_px - event.x
+        dy = y_px - event.y
+        return (dx * dx + dy * dy) <= (self._HOVER_DISTANCE_PX ** 2)
+
+    def _hover_offset(self, ax, t: float, v: float):
+        x0, x1 = ax.get_xlim()
+        y0, y1 = ax.get_ylim()
+        offset_x = 14
+        offset_y = 14
+        if t > x0 + 0.78 * (x1 - x0):
+            offset_x = -14
+        if v > y0 + 0.82 * (y1 - y0):
+            offset_y = -14
+        return offset_x, offset_y
 
     def _find_nearest(self, x_coord):
         if not self.times:
@@ -293,7 +368,13 @@ class PressurePlotWidget(QWidget):
                 t, best = self._find_nearest(event.xdata)
                 if t is not None:
                     val = values[best]
+                    if not self._is_cursor_near_point(ax, event, t, val):
+                        if ann.get_visible():
+                            ann.set_visible(False)
+                            needs_redraw = True
+                        return
                     ann.xy = (t, val)
+                    ann.set_position(self._hover_offset(ax, t, val))
                     new_text = fmt.format(t=t, v=val)
                     if ann.get_text() != new_text:
                         ann.set_text(new_text)
@@ -307,16 +388,21 @@ class PressurePlotWidget(QWidget):
                 needs_redraw = True
 
         _update(self.hover_pressure, self.ax_pressure, self.pressures,
-                "Time: {t:.2f} s\nPressure: {v:.2f} mmHg")
+                "{t:.2f} s\n{v:.2f} mmHg")
         _update(self.hover_mass, self.ax_mass, self.masses,
-                "Time: {t:.2f} s\nMass: {v:.2f} g")
+                "{t:.2f} s\n{v:.2f} g")
 
         if needs_redraw:
             self.canvas.draw_idle()
 
+    def _on_figure_leave(self, _event):
+        self._hide_hover_annotations(redraw=True)
+
     # ── Plot update ────────────────────────────────────────────────────────────
 
     def _trim_history_if_needed(self):
+        if self.max_points <= 0:
+            return
         max_allowed = self.max_points + self._trim_chunk
         if len(self.times) <= max_allowed:
             return
@@ -335,6 +421,9 @@ class PressurePlotWidget(QWidget):
                     self._draw_pump_marker(mt, mr)
 
     def _refresh_plot_view(self, auto_x, auto_y_pressure, auto_y_mass, force_redraw=False):
+        self._auto_x_enabled = bool(auto_x)
+        self._auto_y_pressure_enabled = bool(auto_y_pressure)
+        self._auto_y_mass_enabled = bool(auto_y_mass)
         self.line_pressure.set_data(self.times, self.pressures)
         self.line_mass.set_data(self.times, self.masses)
         prev_xlim = self.ax_pressure.get_xlim()
@@ -344,21 +433,24 @@ class PressurePlotWidget(QWidget):
         # X-axis (setting on ax_pressure propagates to ax_mass via sharex)
         if auto_x:
             self.manual_xlim = None
-            self.scrollbar.hide()
             if len(self.times) > 1:
                 start, end = self.times[0], self.times[-1]
                 pad = max(1, (end - start) * 0.05)
-                self.ax_pressure.set_xlim(start - pad * 0.1, end + pad * 0.9)
+                self.ax_pressure.set_xlim(min(0.0, start), end + pad * 0.6)
             elif self.times:
                 t0 = self.times[-1]
-                self.ax_pressure.set_xlim(t0 - 0.5, t0 + 0.5)
+                self.ax_pressure.set_xlim(min(0.0, t0), t0 + 0.5)
+            self._update_scrollbar()
         else:
-            t_latest = self.times[-1]
-            xmax = max(t_latest, float(self.window_duration))
-            xmin = max(0.0, xmax - self.window_duration)
-            self.manual_xlim = (xmin, xmax)
-            self.ax_pressure.set_xlim(self.manual_xlim)
-            self.scrollbar.hide()
+            if self._manual_x_override and self.manual_xlim:
+                self.ax_pressure.set_xlim(self.manual_xlim)
+            else:
+                t_latest = self.times[-1]
+                xmax = max(t_latest, float(self.window_duration))
+                xmin = max(0.0, xmax - self.window_duration)
+                self.manual_xlim = (xmin, xmax)
+                self.ax_pressure.set_xlim(self.manual_xlim)
+            self._update_scrollbar()
 
         # Pressure Y
         if auto_y_pressure:
@@ -432,6 +524,7 @@ class PressurePlotWidget(QWidget):
 
     def set_manual_x_limits(self, xmin, xmax):
         if xmin < xmax:
+            self._manual_x_override = True
             self.manual_xlim = (xmin, xmax)
             self.ax_pressure.set_xlim(self.manual_xlim)
             self._update_scrollbar()
@@ -456,9 +549,24 @@ class PressurePlotWidget(QWidget):
             log.warning(f"Mass Y limits invalid: {ymin}, {ymax}")
 
     def set_auto_scale_x(self, enabled: bool):
-        pass  # handled inside update_plot
+        self._auto_x_enabled = bool(enabled)
+        if enabled:
+            self.manual_xlim = None
+            self._manual_x_override = False
+        else:
+            if not self._manual_x_override:
+                self.manual_xlim = None
+
+        if self.times:
+            self._refresh_plot_view(
+                enabled,
+                self.manual_ylim_pressure is None,
+                self.manual_ylim_mass is None,
+                force_redraw=True,
+            )
 
     def set_auto_scale_y(self, enabled: bool):
+        self._auto_y_pressure_enabled = bool(enabled)
         if enabled:
             self.manual_ylim_pressure = None
         else:
@@ -467,6 +575,7 @@ class PressurePlotWidget(QWidget):
             self.canvas.draw_idle()
 
     def set_auto_scale_y_mass(self, enabled: bool):
+        self._auto_y_mass_enabled = bool(enabled)
         if enabled:
             self.manual_ylim_mass = None
         else:
@@ -476,6 +585,7 @@ class PressurePlotWidget(QWidget):
 
     def reset_zoom(self, auto_x, auto_y_pressure, auto_y_mass):
         self.manual_xlim = None
+        self._manual_x_override = False
         if auto_x:
             self.scrollbar.hide()
 
@@ -498,7 +608,7 @@ class PressurePlotWidget(QWidget):
                 auto_x, auto_y_pressure, auto_y_mass, force_redraw=True
             )
         else:
-            self.ax_pressure.set_xlim(0, 10)
+            self.ax_pressure.set_xlim(0, float(self.window_duration))
             if not auto_y_pressure:
                 self.ax_pressure.set_ylim(PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
             if not auto_y_mass:
@@ -508,28 +618,59 @@ class PressurePlotWidget(QWidget):
 
     # ── Scrollbar ──────────────────────────────────────────────────────────────
 
-    def _update_scrollbar(self):
-        if not self.times or not self.manual_xlim:
-            self.scrollbar.hide()
-            return
-        xmin, xmax = self.manual_xlim
+    def _scrollbar_position(self):
+        if not self.times:
+            return None
+
+        if self._auto_x_enabled or not self.manual_xlim:
+            xmax = self.times[-1]
+            xmin = max(0.0, xmax - self.window_duration)
+        else:
+            xmin, xmax = self.manual_xlim
+
         idx0 = bisect.bisect_left(self.times, xmin)
         idx1 = bisect.bisect_right(self.times, xmax)
+        return idx0, idx1
+
+    def _update_scrollbar(self):
+        if not self.times:
+            self.scrollbar.hide()
+            return
+
+        pos = self._scrollbar_position()
+        if pos is None:
+            self.scrollbar.hide()
+            return
+
+        idx0, idx1 = pos
         window_size = max(idx1 - idx0, 1)
         full_len = len(self.times)
         if full_len <= window_size:
-            self.scrollbar.hide()
-            return
-        self.scrollbar.setMinimum(0)
-        self.scrollbar.setMaximum(max(full_len - window_size, 0))
-        self.scrollbar.setPageStep(window_size)
-        self.scrollbar.setSingleStep(max(window_size // 10, 1))
-        self.scrollbar.setValue(idx0)
+            if self._auto_x_enabled and full_len > 1:
+                window_size = max(1, full_len // 2)
+                idx0 = max(0, full_len - window_size)
+            else:
+                with QSignalBlocker(self.scrollbar):
+                    self.scrollbar.setMinimum(0)
+                    self.scrollbar.setMaximum(1)
+                    self.scrollbar.setPageStep(1)
+                    self.scrollbar.setSingleStep(1)
+                    self.scrollbar.setValue(0)
+                self.scrollbar.setEnabled(False)
+                self.scrollbar.show()
+                return
+        with QSignalBlocker(self.scrollbar):
+            self.scrollbar.setMinimum(0)
+            self.scrollbar.setMaximum(max(full_len - window_size, 0))
+            self.scrollbar.setPageStep(window_size)
+            self.scrollbar.setSingleStep(max(window_size // 10, 1))
+            self.scrollbar.setValue(idx0)
+        self.scrollbar.setEnabled(True)
         self.scrollbar.show()
 
     @pyqtSlot(int)
     def _on_scroll(self, pos):
-        if not self.manual_xlim or not self.times or len(self.times) <= 1:
+        if not self.times or len(self.times) <= 1:
             return
         window_indices = self.scrollbar.pageStep()
         start_idx = pos
@@ -548,12 +689,23 @@ class PressurePlotWidget(QWidget):
                 xmin_new = self.times[start_idx - 1]
             else:
                 xmax_new = xmin_new + 1.0
+        if self._auto_x_enabled:
+            self._auto_x_enabled = False
+            self.manual_x_mode_requested.emit()
+        self._manual_x_override = True
         self.manual_xlim = (xmin_new, xmax_new)
         self.ax_pressure.set_xlim(self.manual_xlim)
         self.canvas.draw_idle()
 
     def set_window_duration(self, seconds: int):
         self.window_duration = seconds
+        if self.times and self.manual_xlim is not None and not self._manual_x_override:
+            self._refresh_plot_view(
+                False,
+                self.manual_ylim_pressure is None,
+                self.manual_ylim_mass is None,
+                force_redraw=True,
+            )
 
     # ── Pump markers ──────────────────────────────────────────────────────────
 
@@ -607,12 +759,15 @@ class PressurePlotWidget(QWidget):
         self.times.clear()
         self.pressures.clear()
         self.masses.clear()
+        self.manual_xlim = None
+        self._manual_x_override = False
+        self.scrollbar.hide()
         self._clear_pump_markers()
         self._pump_marker_data.clear()
 
         self.line_pressure.set_data([], [])
         self.line_mass.set_data([], [])
-        self.ax_pressure.set_xlim(0, 100)
+        self.ax_pressure.set_xlim(0, float(self.window_duration))
 
         ylim_p = self.manual_ylim_pressure
         if ylim_p and isinstance(ylim_p, tuple) and all(math.isfinite(v) for v in ylim_p):

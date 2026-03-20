@@ -8,6 +8,7 @@ Live pressure and mass data logger for cystometry experiments. Connects to an Ar
 
 ### 1. Connect the Device
 - Select the Arduino serial port from the dropdown in the toolbar.
+- Or select **Virtual CystoMoto (Built-in simulator)** to test plotting without hardware.
 - Click **Connect CystoMoto Device**.
 - The status panel will show "Connected" when the device is recognized.
 
@@ -16,17 +17,19 @@ Live pressure and mass data logger for cystometry experiments. Connects to an Ar
 - Click **Zero Device?** to baseline the sensor.
 
 ### 3. Record Data
-- Click **⏺ Start Recording** to open a new CSV file. Data is written immediately, even before the pump starts.
+- Click **⏺ Start Recording** to create a new file and open the run setup dialog. Choose the CSV destination for this run and enter any experiment metadata you want saved with it.
+- CystoMoto saves the live data to the selected CSV and writes the run metadata to a companion `*_metadata.json` file in the same folder.
 - Click **Start Fill** to start the syringe pump. A green marker appears on the plot.
 - Click **Stop Pump** to stop the pump. A red marker appears. Recording continues.
 - Click **⏹ Stop Recording** to finalize and close the CSV file.
 
 Each recording is saved to a timestamped folder under `~/Documents/CystoMoto Results/YYYY-MM-DD/FillN/`.
 
-The CSV includes: `Row Type` (`DATA` / `MARKER`), `Frame Index`, `Time (s)`, `Pressure (mmHg)`, `Mass (g)`, `Pump Running` (0 or 1), `Pump Event`, and `Marker Time (s)`.
+The CSV includes one row per sample: `Frame Index`, `Time (s)`, `Pressure (mmHg)`, `Mass (g)`, `Pump Running` (0 or 1), `Pump Event`, and `Marker Time (s)`. If multiple pump events occur between samples, they are joined with semicolons in the event/time columns instead of creating extra rows.
 
 ### 4. Plot Controls
-- **Auto-scale X / Pressure Y / Mass Y**: toggle automatic axis scaling.
+- **Auto-scale X**: fit the full trace on the time axis. Turn it off to use the trailing live window or manual X limits.
+- **Auto-scale Pressure Y / Mass Y**: toggle automatic vertical scaling.
 - **Reset Zoom/View**: restore the default view.
 - **Clear Plot Data**: wipe the live traces (does not affect the saved CSV).
 - **Export Plot Image**: save the current plot as an image file.
@@ -70,8 +73,8 @@ pip install pyinstaller pillow
 pip install -r cysto_app/requirements.txt
 brew install create-dmg
 
-# 2. Patch the version number (replace 0.1.0 with the release version)
-VERSION="0.1.0"
+# 2. Patch the version number (replace 1.0.0 with the release version)
+VERSION="1.0.0"
 sed -i '' "s/APP_VERSION = \"[^\"]*\"/APP_VERSION = \"$VERSION\"/" cysto_app/utils/config.py
 sed -i '' "s/APP_VERSION=\"[^\"]*\"/APP_VERSION=\"$VERSION\"/" build_macos.sh
 sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/" CystoMoto_macos.spec
@@ -137,6 +140,8 @@ frame_index,elapsed_time_s,pressure_mmhg[,mass_g]
 ```
 
 The `mass_g` field is optional — if omitted, mass is recorded as `0.0`.
+
+If you do not have hardware connected, choose **Virtual CystoMoto** in the device list. The built-in simulator emits realistic pressure and mass data continuously and responds to the same `Z`, `G`, and `S` commands used by the Arduino workflow.
 
 ---
 

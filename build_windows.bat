@@ -3,7 +3,7 @@ setlocal enabledelayedexpansion
 
 echo ============================================================
 echo  CystoMoto Windows Build Script
-echo  Version: 0.0.0
+echo  Version: 1.0.0
 echo ============================================================
 echo.
 
@@ -74,5 +74,5 @@ echo.
 
 echo ============================================================
 echo  BUILD COMPLETE
-echo  Installer: installer_output\CystoMoto_Setup_v0.0.0.exe
+echo  Installer: installer_output\CystoMoto_Setup_v1.0.0.exe
 echo ============================================================

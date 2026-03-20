@@ -29,7 +29,7 @@ SERIAL_COMMAND_TERMINATOR = b"\n"  # Arduino uses Serial.println()
 
 # ─── Application info ───────────────────────────────────────────────────────────
 APP_NAME = "CystoMoto"
-APP_VERSION = "0.0.0"
+APP_VERSION = "1.0.0"
 ABOUT_TEXT = f"""
 <strong>{APP_NAME} v{APP_VERSION}</strong>
 <p>Passive Data Logger and Viewer for the CystoMoto system.</p>
@@ -42,7 +42,7 @@ and allows exporting of synchronized CSV logs.</p>
 LOG_LEVEL = "DEBUG"  # DEBUG, INFO, WARNING, ERROR
 
 # ─── Plotting ──────────────────────────────────────────────────────────────────
-PLOT_MAX_POINTS = 1000  # Max points to keep in live plot
+PLOT_MAX_POINTS = 0  # 0 keeps the full trace in memory; positive values enable trimming
 PLOT_DEFAULT_Y_MIN = -5
 PLOT_DEFAULT_Y_MAX = 30  # Typical pressure range in mmHg
 PLOT_DEFAULT_MASS_Y_MIN = 0
