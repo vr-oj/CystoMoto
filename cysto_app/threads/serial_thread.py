@@ -103,7 +103,7 @@ class SerialThread(QThread):
                         raw = self.ser.readline()
                         if raw:
                             line = raw.decode("utf-8", errors="replace").strip()
-                            log.debug(f"Raw serial data: {line}")
+                            log.debug("Raw serial data: %s", line)
 
                             parts = [fld.strip() for fld in line.split(",")]
                             if len(parts) < 3:
@@ -117,7 +117,7 @@ class SerialThread(QThread):
                                     p = float(parts[2])
                                     mass = float(parts[3]) if len(parts) >= 4 else 0.0
                                 except ValueError as ve:
-                                    log.error(f"Parse error for line '{line}': {ve}")
+                                    log.error("Parse error for line '%s': %s", line, ve)
                                 else:
                                     # Valid packet → emit signal
                                     self.data_ready.emit(frame_idx_device, t_device, p, mass)

@@ -57,6 +57,8 @@ except ImportError:
         "utils.app_settings not found. Persistent settings will not work."
     )
 
+from utils.qt_runtime import configure_qt_runtime_environment
+
 
 def apply_dark_theme(app):
     dark_palette = QPalette()
@@ -100,6 +102,16 @@ def load_processed_qss(path):
 
 
 def main_app_entry():
+    try:
+        qt_info = configure_qt_runtime_environment(repair_hidden=True)
+        log.info(
+            "Qt runtime configured: prefix=%s plugins=%s",
+            qt_info.prefix_path,
+            qt_info.plugins_path,
+        )
+    except Exception as e:
+        log.warning(f"Qt runtime preflight failed: {e}")
+
     if hasattr(Qt, "AA_EnableHighDpiScaling"):
         QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     if hasattr(Qt, "AA_UseHighDpiPixmaps"):

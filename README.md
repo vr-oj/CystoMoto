@@ -23,7 +23,7 @@ Live pressure and mass data logger for cystometry experiments. Connects to an Ar
 
 Each recording is saved to a timestamped folder under `~/Documents/CystoMoto Results/YYYY-MM-DD/FillN/`.
 
-The CSV includes: `Frame Index`, `Time (s)`, `Pressure (mmHg)`, `Mass (g)`, `Pump Running` (0 or 1).
+The CSV includes: `Row Type` (`DATA` / `MARKER`), `Frame Index`, `Time (s)`, `Pressure (mmHg)`, `Mass (g)`, `Pump Running` (0 or 1), `Pump Event`, and `Marker Time (s)`.
 
 ### 4. Plot Controls
 - **Auto-scale X / Pressure Y / Mass Y**: toggle automatic axis scaling.
@@ -121,6 +121,9 @@ pip install -r cysto_app/requirements.txt
 
 # 4. Run the app
 python cysto_app/cysto_app.py
+
+# Optional: run with Qt preflight first
+make run
 ```
 
 ---
@@ -145,6 +148,7 @@ The `mass_g` field is optional — if omitted, mass is recorded as `0.0`.
 | App shows "Serial Error" | Verify the correct port is selected and the baud rate is 115200 |
 | macOS blocks the app | Right-click → Open → confirm launch |
 | Plot shows no data | Check that the Arduino is streaming (Console Log in View menu) |
+| Qt startup fails (`cocoa` plugin / platform plugin errors) | Run `make check-qt` then `make qt-repair` |
 
 ---
 

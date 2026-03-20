@@ -5,6 +5,8 @@ import sys
 import logging
 import csv
 import subprocess
+import time
+from collections import deque
 
 from PyQt5.QtWidgets import (
     QApplication,
@@ -82,6 +84,16 @@ class MainWindow(QMainWindow):
         self._last_data_time: float = 0.0
         self._t_offset: float = 0.0   # accumulated offset from Arduino timer resets
         self._last_raw_t: float = 0.0  # last raw t received from Arduino
+        self._pending_pump_marker_events = deque()  # queued bools: True=ON, False=OFF
+        self._pending_plot_samples = []  # list[(t, p, mass)] waiting for batched draw
+        self._csv_row_buffer = []  # buffered CSV rows to reduce per-packet file I/O
+
+        self._plot_batch_size = 512
+        self._csv_flush_threshold = 256
+        self._status_update_interval_s = 0.05
+        self._console_update_interval_s = 0.10
+        self._last_status_update_s = 0.0
+        self._last_console_update_s = 0.0
 
         self._init_paths_and_icons()
         self._build_console_log_dock()
@@ -89,6 +101,7 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._build_main_toolbar()
         self._build_status_bar()
+        self._init_background_timers()
 
         self._set_initial_control_states()
 
@@ -136,6 +149,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(console_widget)
         self.console_out_textedit = QTextEdit(readOnly=True)
         self.console_out_textedit.setFontFamily("monospace")
+        # Keep console memory bounded during long acquisitions.
+        self.console_out_textedit.document().setMaximumBlockCount(5000)
         layout.addWidget(self.console_out_textedit)
         self.dock_console.setWidget(console_widget)
         self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_console)
@@ -314,6 +329,18 @@ class MainWindow(QMainWindow):
         self._app_session_timer.timeout.connect(self._update_app_session_time)
         self._app_session_timer.start()
 
+    def _init_background_timers(self):
+        # Plot redraw timer: decouples serial packet rate from UI redraw rate.
+        self._plot_update_timer = QTimer(self)
+        self._plot_update_timer.setInterval(33)  # ~30 FPS max redraw
+        self._plot_update_timer.timeout.connect(self._drain_plot_samples)
+        self._plot_update_timer.start()
+
+        # CSV timer: writes buffered rows in chunks while recording.
+        self._csv_flush_timer = QTimer(self)
+        self._csv_flush_timer.setInterval(200)
+        self._csv_flush_timer.timeout.connect(self._flush_csv_rows)
+
     @pyqtSlot()
     def _update_app_session_time(self):
         self._app_session_seconds += 1
@@ -328,6 +355,8 @@ class MainWindow(QMainWindow):
         if self.pressure_plot_widget and hasattr(
             self.pressure_plot_widget, "clear_plot"
         ):
+            self._pending_plot_samples.clear()
+            self._pending_pump_marker_events.clear()
             self.pressure_plot_widget.clear_plot()
             self.statusBar().showMessage("Pressure plot data cleared.", 3000)
 
@@ -338,6 +367,8 @@ class MainWindow(QMainWindow):
             if self.pressure_plot_widget and hasattr(
                 self.pressure_plot_widget, "clear_plot"
             ):
+                self._pending_plot_samples.clear()
+                self._pending_pump_marker_events.clear()
                 self.pressure_plot_widget.clear_plot()
 
             if self._serial_thread and self._serial_thread.isRunning():
@@ -361,7 +392,16 @@ class MainWindow(QMainWindow):
             self._csv_file = open(filepath, "w", newline="")
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_writer.writerow(
-                ["Frame Index", "Time (s)", "Pressure (mmHg)", "Mass (g)", "Pump Running"]
+                [
+                    "Row Type",
+                    "Frame Index",
+                    "Time (s)",
+                    "Pressure (mmHg)",
+                    "Mass (g)",
+                    "Pump Running",
+                    "Pump Event",
+                    "Marker Time (s)",
+                ]
             )
             self._recording_path = filepath
             folder_name = os.path.basename(fill_folder)
@@ -379,6 +419,7 @@ class MainWindow(QMainWindow):
         """Flush and close the current CSV recording file."""
         if self._csv_file:
             try:
+                self._flush_csv_rows()
                 self._csv_file.flush()
                 self._csv_file.close()
                 log.info(f"Recording stopped: {self._recording_path}")
@@ -389,6 +430,41 @@ class MainWindow(QMainWindow):
                 self._csv_writer = None
                 self._recording_path = None
 
+    def _queue_csv_row(self, row):
+        if not self._csv_writer:
+            return
+        self._csv_row_buffer.append(row)
+        if len(self._csv_row_buffer) >= self._csv_flush_threshold:
+            self._flush_csv_rows()
+
+    @pyqtSlot()
+    def _flush_csv_rows(self):
+        if not self._csv_writer or not self._csv_row_buffer:
+            return
+        try:
+            self._csv_writer.writerows(self._csv_row_buffer)
+            self._csv_row_buffer.clear()
+            if self._csv_file:
+                self._csv_file.flush()
+        except Exception:
+            log.exception("Failed flushing buffered CSV rows")
+
+    @pyqtSlot()
+    def _drain_plot_samples(self):
+        if not self._pending_plot_samples:
+            return
+        if not self.pressure_plot_widget:
+            self._pending_plot_samples.clear()
+            return
+
+        ax = self.plot_control_panel.auto_x_cb.isChecked()
+        ay = self.plot_control_panel.auto_y_cb.isChecked()
+        ay_mass = self.plot_control_panel.auto_y_mass_cb.isChecked()
+
+        batch = self._pending_plot_samples
+        self._pending_plot_samples = []
+        self.pressure_plot_widget.update_plot_batch(batch, ax, ay, ay_mass)
+
     # ─── Pump control slots ──────────────────────────────────────────────────
 
     @pyqtSlot()
@@ -397,7 +473,8 @@ class MainWindow(QMainWindow):
         try:
             self._pump_running = True
             self.pump_ctrl.update_pump_state(True)
-            self.pressure_plot_widget.add_pump_marker(self._last_data_time, running=True)
+            if self._recording_active:
+                self._pending_pump_marker_events.append(True)
 
             if self._serial_thread and self._serial_thread.isRunning():
                 self._serial_thread.send_command("G")
@@ -411,7 +488,8 @@ class MainWindow(QMainWindow):
         try:
             self._pump_running = False
             self.pump_ctrl.update_pump_state(False)
-            self.pressure_plot_widget.add_pump_marker(self._last_data_time, running=False)
+            if self._recording_active:
+                self._pending_pump_marker_events.append(False)
 
             if self._serial_thread and self._serial_thread.isRunning():
                 self._serial_thread.send_command("S")
@@ -425,10 +503,21 @@ class MainWindow(QMainWindow):
         try:
             # Fresh trace for this recording session
             self.pressure_plot_widget.clear_plot()
+            self._pending_pump_marker_events.clear()
+            self._pending_plot_samples.clear()
+            self._csv_row_buffer.clear()
             self._start_recording()
+            if not self._csv_writer:
+                self.statusBar().showMessage("Failed to start recording.", 4000)
+                self._recording_active = False
+                self._csv_flush_timer.stop()
+                return
             self._t_offset = 0.0
             self._last_raw_t = 0.0
+            self._last_status_update_s = 0.0
+            self._last_console_update_s = 0.0
             self._recording_active = True
+            self._csv_flush_timer.start()
             self.pump_ctrl.update_recording_state(True)
         except Exception:
             log.exception("Failed to start recording")
@@ -437,8 +526,14 @@ class MainWindow(QMainWindow):
     def _on_stop_recording(self):
         """Finalize the CSV recording."""
         try:
+            self._drain_plot_samples()
+            self._flush_csv_rows()
+            self._csv_flush_timer.stop()
             self._stop_recording()
             self._recording_active = False
+            self._pending_pump_marker_events.clear()
+            self._pending_plot_samples.clear()
+            self._csv_row_buffer.clear()
             self.pump_ctrl.update_recording_state(False)
             self.statusBar().showMessage("Recording stopped.", 4000)
         except Exception:
@@ -449,6 +544,50 @@ class MainWindow(QMainWindow):
             self.plot_control_panel.setEnabled(True)
 
     # ─── Menu Actions & Dialog Slots ──────────────────────────────────────────
+    @staticmethod
+    def _pump_event_label(running: bool) -> str:
+        return "Pump ON" if running else "Pump OFF"
+
+    @classmethod
+    def _build_plot_export_rows(cls, times, pressures, masses, pump_markers):
+        """Build CSV rows where marker rows are separated from sample rows."""
+        rows = []
+        sorted_markers = sorted(pump_markers, key=lambda pair: pair[0]) if pump_markers else []
+        marker_idx = 0
+        running = False
+        eps = 1e-9
+
+        for t, p, m in zip(times, pressures, masses):
+            events_here = []
+            while marker_idx < len(sorted_markers) and sorted_markers[marker_idx][0] <= t + eps:
+                marker_t, marker_running = sorted_markers[marker_idx]
+                running = bool(marker_running)
+                label = cls._pump_event_label(running)
+                events_here.append(label)
+                rows.append(["MARKER", "", "", "", "", 1 if running else 0, label, f"{marker_t:.4f}"])
+                marker_idx += 1
+            rows.append(
+                [
+                    "DATA",
+                    "",
+                    f"{t:.4f}",
+                    f"{p:.4f}",
+                    f"{m:.4f}",
+                    1 if running else 0,
+                    ";".join(events_here),
+                    "",
+                ]
+            )
+
+        while marker_idx < len(sorted_markers):
+            marker_t, marker_running = sorted_markers[marker_idx]
+            running = bool(marker_running)
+            label = cls._pump_event_label(running)
+            rows.append(["MARKER", "", "", "", "", 1 if running else 0, label, f"{marker_t:.4f}"])
+            marker_idx += 1
+
+        return rows
+
     def _export_plot_data_as_csv(self):
         path, _ = QFileDialog.getSaveFileName(
             self,
@@ -459,11 +598,27 @@ class MainWindow(QMainWindow):
         if path:
             try:
                 data = self.pressure_plot_widget.get_plot_data()
+                export_rows = self._build_plot_export_rows(
+                    data["time"],
+                    data["pressure"],
+                    data["mass"],
+                    data.get("pump_markers", []),
+                )
                 with open(path, "w", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(["Time (s)", "Pressure (mmHg)", "Mass (g)"])
-                    for t, p, m in zip(data["time"], data["pressure"], data["mass"]):
-                        writer.writerow([t, p, m])
+                    writer.writerow(
+                        [
+                            "Row Type",
+                            "Frame Index",
+                            "Time (s)",
+                            "Pressure (mmHg)",
+                            "Mass (g)",
+                            "Pump Running",
+                            "Pump Event",
+                            "Marker Time (s)",
+                        ]
+                    )
+                    writer.writerows(export_rows)
                 self.statusBar().showMessage(f"Plot data exported to {path}", 3000)
             except Exception as e:
                 log.error(f"Error exporting CSV: {e}")
@@ -639,28 +794,64 @@ class MainWindow(QMainWindow):
         t_adj = t + self._t_offset
 
         self._last_data_time = t_adj
-        # Always update device status display regardless of recording state
-        self.top_ctrl.update_device_data(idx, t_adj, p)
+        now_s = time.monotonic()
+        # Throttle device status repaint to keep UI smooth at high packet rates.
+        if (now_s - self._last_status_update_s) >= self._status_update_interval_s:
+            self.top_ctrl.update_device_data(idx, t_adj, p)
+            self._last_status_update_s = now_s
 
         # Plot and CSV are only active while recording
         if not self._recording_active:
             return
 
-        ax = self.plot_control_panel.auto_x_cb.isChecked()
-        ay = self.plot_control_panel.auto_y_cb.isChecked()
-        ay_mass = self.plot_control_panel.auto_y_mass_cb.isChecked()
+        marker_events = []
+        if self._pending_pump_marker_events:
+            while self._pending_pump_marker_events:
+                is_running = bool(self._pending_pump_marker_events.popleft())
+                self.pressure_plot_widget.add_pump_marker(
+                    t_adj, running=is_running, redraw=False
+                )
+                marker_events.append((is_running, self._pump_event_label(is_running)))
 
-        self.pressure_plot_widget.update_plot(t_adj, p, mass, ax, ay, ay_mass)
+        self._pending_plot_samples.append((t_adj, p, mass))
+        if len(self._pending_plot_samples) >= self._plot_batch_size:
+            self._drain_plot_samples()
 
         if self._csv_writer:
-            self._csv_writer.writerow(
-                [idx, f"{t_adj:.4f}", f"{p:.4f}", f"{mass:.4f}", 1 if self._pump_running else 0]
+            pump_event = ";".join(label for _, label in marker_events)
+            self._queue_csv_row(
+                [
+                    "DATA",
+                    idx,
+                    f"{t_adj:.4f}",
+                    f"{p:.4f}",
+                    f"{mass:.4f}",
+                    1 if self._pump_running else 0,
+                    pump_event,
+                    "",
+                ]
             )
+            for is_running, label in marker_events:
+                self._queue_csv_row(
+                    [
+                        "MARKER",
+                        "",
+                        "",
+                        "",
+                        "",
+                        1 if is_running else 0,
+                        label,
+                        f"{t_adj:.4f}",
+                    ]
+                )
 
-        if self.dock_console.isVisible():
+        if self.dock_console.isVisible() and (
+            now_s - self._last_console_update_s
+        ) >= self._console_update_interval_s:
             self.console_out_textedit.append(
                 f"Data: Idx={idx}, Time={t_adj:.3f}s, P={p:.2f}, Mass={mass:.2f}g"
             )
+            self._last_console_update_s = now_s
 
     # ─── Window Close Cleanup ──────────────────────────────────────────────────
     def closeEvent(self, event):

@@ -23,6 +23,7 @@ from utils.config import (
     PLOT_DEFAULT_Y_MAX,
     PLOT_DEFAULT_MASS_Y_MIN,
     PLOT_DEFAULT_MASS_Y_MAX,
+    PLOT_MAX_POINTS,
 )
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,21 @@ _HOVER_KW = dict(
 
 
 class PressurePlotWidget(QWidget):
+    _STACKED_LAYOUT_KW = {
+        "left": 0.06,
+        "right": 0.995,
+        "top": 0.985,
+        "bottom": 0.08,
+        "hspace": 0.08,
+    }
+    _SIDE_BY_SIDE_LAYOUT_KW = {
+        "left": 0.06,
+        "right": 0.995,
+        "top": 0.985,
+        "bottom": 0.10,
+        "wspace": 0.16,
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         mpl.rcParams.update(
@@ -58,7 +74,8 @@ class PressurePlotWidget(QWidget):
         outer_layout.setContentsMargins(0, 0, 0, 0)
 
         # Figure + canvas
-        self.fig = Figure(facecolor="white", constrained_layout=True)
+        # constrained_layout can become expensive under high-frequency redraws.
+        self.fig = Figure(facecolor="white", constrained_layout=False)
         self.canvas = FigureCanvas(self.fig)
         outer_layout.addWidget(self.canvas)
 
@@ -98,6 +115,8 @@ class PressurePlotWidget(QWidget):
         self.manual_ylim_pressure = (PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
         self.manual_ylim_mass = (PLOT_DEFAULT_MASS_Y_MIN, PLOT_DEFAULT_MASS_Y_MAX)
         self.window_duration = 60
+        self.max_points = max(int(PLOT_MAX_POINTS), 200)
+        self._trim_chunk = max(50, self.max_points // 8)
 
         # Pump markers: persistent data survives layout rebuilds; artists do not
         self._pump_marker_data = []  # list of (t: float, running: bool)
@@ -128,7 +147,14 @@ class PressurePlotWidget(QWidget):
             self.ax_mass = self.fig.add_subplot(gs[1], sharex=self.ax_pressure)
 
         self._style_axes(mode)
+        self._apply_figure_layout(mode)
         self._restore_plot_state()
+
+    def _apply_figure_layout(self, mode: str):
+        if mode == "stacked":
+            self.fig.subplots_adjust(**self._STACKED_LAYOUT_KW)
+        else:
+            self.fig.subplots_adjust(**self._SIDE_BY_SIDE_LAYOUT_KW)
 
     def _style_axes(self, mode: str):
         for ax in (self.ax_pressure, self.ax_mass):
@@ -200,13 +226,16 @@ class PressurePlotWidget(QWidget):
             color="gray",
             bbox=dict(boxstyle="round,pad=0.5", fc="#ECEFF4", alpha=0.8),
         )
+        self.placeholder.set_in_layout(False)
         self.placeholder.set_visible(not bool(self.times))
 
         # Hover annotations
         self.hover_pressure = self.ax_pressure.annotate("", **_HOVER_KW)
         self.hover_pressure.set_visible(False)
+        self.hover_pressure.set_in_layout(False)
         self.hover_mass = self.ax_mass.annotate("", **_HOVER_KW)
         self.hover_mass.set_visible(False)
+        self.hover_mass.set_in_layout(False)
 
         # Re-draw pump markers from stored data
         for t, running in self._pump_marker_data:
@@ -224,7 +253,7 @@ class PressurePlotWidget(QWidget):
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    def _update_placeholder(self, text=None):
+    def _update_placeholder(self, text=None, redraw=True):
         if text:
             self.line_pressure.set_data([], [])
             if self.hover_pressure.get_visible():
@@ -235,7 +264,8 @@ class PressurePlotWidget(QWidget):
         else:
             if self.placeholder:
                 self.placeholder.set_visible(False)
-        self.canvas.draw_idle()
+        if redraw:
+            self.canvas.draw_idle()
 
     def _find_nearest(self, x_coord):
         if not self.times:
@@ -286,22 +316,27 @@ class PressurePlotWidget(QWidget):
 
     # ── Plot update ────────────────────────────────────────────────────────────
 
-    @pyqtSlot(float, float, float, bool, bool, bool)
-    def update_plot(self, t, p, mass, auto_x, auto_y_pressure, auto_y_mass):
-        if self.times and t <= self.times[-1]:
-            log.warning(f"[plot] dropped non-monotonic packet: incoming t={t:.4f}, last plotted t={self.times[-1]:.4f}")
+    def _trim_history_if_needed(self):
+        max_allowed = self.max_points + self._trim_chunk
+        if len(self.times) <= max_allowed:
             return
+        keep_from = len(self.times) - self.max_points
+        del self.times[:keep_from]
+        del self.pressures[:keep_from]
+        del self.masses[:keep_from]
 
-        if not self.times and self.placeholder and self.placeholder.get_visible():
-            self._update_placeholder(None)
+        if self._pump_marker_data and self.times:
+            min_t = self.times[0]
+            kept_markers = [(t, running) for (t, running) in self._pump_marker_data if t >= min_t]
+            if len(kept_markers) != len(self._pump_marker_data):
+                self._pump_marker_data = kept_markers
+                self._clear_pump_markers()
+                for mt, mr in self._pump_marker_data:
+                    self._draw_pump_marker(mt, mr)
 
-        self.times.append(t)
-        self.pressures.append(p)
-        self.masses.append(mass)
-
+    def _refresh_plot_view(self, auto_x, auto_y_pressure, auto_y_mass, force_redraw=False):
         self.line_pressure.set_data(self.times, self.pressures)
         self.line_mass.set_data(self.times, self.masses)
-
         prev_xlim = self.ax_pressure.get_xlim()
         prev_ylim_p = self.ax_pressure.get_ylim()
         prev_ylim_m = self.ax_mass.get_ylim()
@@ -352,6 +387,8 @@ class PressurePlotWidget(QWidget):
                 self.ax_mass.set_ylim(PLOT_DEFAULT_MASS_Y_MIN, PLOT_DEFAULT_MASS_Y_MAX)
 
         if (
+            force_redraw
+            or
             prev_xlim != self.ax_pressure.get_xlim()
             or prev_ylim_p != self.ax_pressure.get_ylim()
             or prev_ylim_m != self.ax_mass.get_ylim()
@@ -359,6 +396,37 @@ class PressurePlotWidget(QWidget):
             or self.line_mass.stale
         ):
             self.canvas.draw_idle()
+
+    def update_plot_batch(self, samples, auto_x, auto_y_pressure, auto_y_mass):
+        if not samples:
+            return
+        if not self.times and self.placeholder and self.placeholder.get_visible():
+            self._update_placeholder(None, redraw=False)
+
+        dropped = 0
+        for t, p, mass in samples:
+            if self.times and t <= self.times[-1]:
+                dropped += 1
+                continue
+            self.times.append(t)
+            self.pressures.append(p)
+            self.masses.append(mass)
+
+        if dropped:
+            log.warning(
+                "[plot] dropped %d non-monotonic packets (last t=%.4f).",
+                dropped,
+                self.times[-1] if self.times else float("nan"),
+            )
+        if not self.times:
+            return
+
+        self._trim_history_if_needed()
+        self._refresh_plot_view(auto_x, auto_y_pressure, auto_y_mass)
+
+    @pyqtSlot(float, float, float, bool, bool, bool)
+    def update_plot(self, t, p, mass, auto_x, auto_y_pressure, auto_y_mass):
+        self.update_plot_batch([(t, p, mass)], auto_x, auto_y_pressure, auto_y_mass)
 
     # ── Manual axis limit setters ─────────────────────────────────────────────
 
@@ -424,9 +492,10 @@ class PressurePlotWidget(QWidget):
             self.manual_ylim_mass = None
 
         if self.times:
-            self.update_plot(
-                self.times[-1], self.pressures[-1], self.masses[-1],
-                auto_x, auto_y_pressure, auto_y_mass,
+            if self.placeholder and self.placeholder.get_visible():
+                self.placeholder.set_visible(False)
+            self._refresh_plot_view(
+                auto_x, auto_y_pressure, auto_y_mass, force_redraw=True
             )
         else:
             self.ax_pressure.set_xlim(0, 10)
@@ -488,30 +557,39 @@ class PressurePlotWidget(QWidget):
 
     # ── Pump markers ──────────────────────────────────────────────────────────
 
-    def add_pump_marker(self, t: float, running: bool):
+    def add_pump_marker(self, t: float, running: bool, redraw: bool = True):
         self._pump_marker_data.append((t, running))
         self._draw_pump_marker(t, running)
-        self.canvas.draw_idle()
+        if redraw:
+            self.canvas.draw_idle()
 
     def _draw_pump_marker(self, t: float, running: bool):
         color = "#2E8B57" if running else "#BF616A"
         label = "Pump ON" if running else "Pump OFF"
+        prev_xlim_pressure = self.ax_pressure.get_xlim()
+        prev_xlim_mass = self.ax_mass.get_xlim()
 
         def _vline_and_label(ax):
             line = ax.axvline(
                 x=t, color=color, linestyle="--", linewidth=1.5, alpha=0.85, zorder=3
             )
+            line.set_in_layout(False)
             txt = ax.text(
                 t, 0.98, f" {label}",
                 color=color, fontsize=8, fontweight="bold",
                 rotation=90, va="top", ha="right",
                 transform=ax.get_xaxis_transform(), zorder=4,
             )
+            txt.set_clip_on(True)
+            txt.set_clip_path(ax.patch)
+            txt.set_in_layout(False)
             return line, txt
 
         lp, tp = _vline_and_label(self.ax_pressure)
         lm, tm = _vline_and_label(self.ax_mass)
         self._pump_markers.append((lp, tp, lm, tm))
+        self.ax_pressure.set_xlim(prev_xlim_pressure)
+        self.ax_mass.set_xlim(prev_xlim_mass)
 
     def _clear_pump_markers(self):
         """Remove marker artists. Does NOT clear _pump_marker_data."""
@@ -561,6 +639,7 @@ class PressurePlotWidget(QWidget):
             "time": list(self.times),
             "pressure": list(self.pressures),
             "mass": list(self.masses),
+            "pump_markers": list(self._pump_marker_data),
         }
 
     def export_as_image(self):

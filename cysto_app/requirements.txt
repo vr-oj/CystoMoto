@@ -1,4 +1,6 @@
 matplotlib>=3.9
 numpy>=1.26
-PyQt5>=5.15
+PyQt5==5.15.11
+PyQt5-Qt5==5.15.18
+PyQt5_sip==12.18.0
 pyserial>=3.5
