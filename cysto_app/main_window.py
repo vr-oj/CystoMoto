@@ -66,16 +66,13 @@ from utils.path_helpers import get_next_fill_folder
 log = logging.getLogger(__name__)
 
 CSV_HEADER = [
-    "Frame Index",
     "Time (s)",
     "Pressure (mmHg)",
     "Mass (g)",
     "Pump Running",
-    "Pump Event",
-    "Marker Time (s)",
+    "Event",
 ]
-CSV_PUMP_EVENT_COL = 5
-CSV_MARKER_TIME_COL = 6
+CSV_EVENT_COL = 4
 
 
 class MainWindow(QMainWindow):
@@ -104,7 +101,7 @@ class MainWindow(QMainWindow):
         self._recording_time_origin: float | None = None
         self._t_offset: float = 0.0   # accumulated offset from Arduino timer resets
         self._last_raw_t: float = 0.0  # last raw t received from Arduino
-        self._pending_csv_events = deque()  # queued tuples[(marker_time, running)]
+        self._pending_csv_events = deque()  # queued tuples[(marker_time, label_str)]
         self._pending_csv_sample_row = None
         self._pending_plot_samples = []  # list[(t, p, mass)] waiting for batched draw
         self._csv_row_buffer = []  # buffered CSV rows to reduce per-packet file I/O
@@ -202,6 +199,7 @@ class MainWindow(QMainWindow):
         self.pump_ctrl.pump_stop_requested.connect(self._on_stop_pump)
         self.pump_ctrl.record_start_requested.connect(self._on_start_recording)
         self.pump_ctrl.record_stop_requested.connect(self._on_stop_recording)
+        self.pump_ctrl.annotation_requested.connect(self._on_add_annotation)
         top_row_lay.addWidget(self.pump_ctrl, stretch=1)
 
         self.plot_control_panel = PlotControlPanel(self)
@@ -515,32 +513,26 @@ class MainWindow(QMainWindow):
                 self._recording_metadata = {}
 
     @classmethod
-    def _append_events_to_csv_row(cls, row, events):
-        if not events:
+    def _append_event_labels_to_csv_row(cls, row, labels):
+        """Append event label strings to the Event column."""
+        if not labels:
             return
-        labels = ";".join(cls._pump_event_label(bool(running)) for _, running in events)
-        marker_times = ";".join(f"{marker_t:.4f}" for marker_t, _ in events)
-        if row[CSV_PUMP_EVENT_COL]:
-            row[CSV_PUMP_EVENT_COL] = f"{row[CSV_PUMP_EVENT_COL]};{labels}"
+        combined = ";".join(labels)
+        if row[CSV_EVENT_COL]:
+            row[CSV_EVENT_COL] = f"{row[CSV_EVENT_COL]};{combined}"
         else:
-            row[CSV_PUMP_EVENT_COL] = labels
-        if row[CSV_MARKER_TIME_COL]:
-            row[CSV_MARKER_TIME_COL] = f"{row[CSV_MARKER_TIME_COL]};{marker_times}"
-        else:
-            row[CSV_MARKER_TIME_COL] = marker_times
+            row[CSV_EVENT_COL] = combined
 
     @classmethod
-    def _build_csv_sample_row(cls, idx, t_plot, pressure, mass, pump_running, events=None):
+    def _build_csv_sample_row(cls, t_plot, pressure, mass, pump_running, event_labels=None):
         row = [
-            "" if idx is None else idx,
             f"{t_plot:.4f}",
             f"{pressure:.4f}",
             f"{mass:.4f}",
             1 if pump_running else 0,
             "",
-            "",
         ]
-        cls._append_events_to_csv_row(row, events or [])
+        cls._append_event_labels_to_csv_row(row, event_labels or [])
         return row
 
     def _finalize_pending_csv_sample_row(self):
@@ -552,15 +544,15 @@ class MainWindow(QMainWindow):
     def _attach_pending_events_to_pending_row(self):
         if not self._pending_csv_events:
             return
-        events = list(self._pending_csv_events)
+        labels = [lbl for _, lbl in self._pending_csv_events]
         self._pending_csv_events.clear()
         if self._pending_csv_sample_row is None:
             log.warning(
-                "Dropping %d pending pump events because there is no sample row to attach them to.",
-                len(events),
+                "Dropping %d pending events because there is no sample row to attach them to.",
+                len(labels),
             )
             return
-        self._append_events_to_csv_row(self._pending_csv_sample_row, events)
+        self._append_event_labels_to_csv_row(self._pending_csv_sample_row, labels)
 
     def _current_recording_marker_time(self) -> float:
         if self._recording_time_origin is None:
@@ -571,9 +563,18 @@ class MainWindow(QMainWindow):
         if not self._recording_active:
             return
         marker_t = self._current_recording_marker_time()
-        self._pending_csv_events.append((marker_t, running))
+        label = self._pump_event_label(running)
+        self._pending_csv_events.append((marker_t, label))
         if self.pressure_plot_widget:
             self.pressure_plot_widget.add_pump_marker(marker_t, running)
+
+    def _register_annotation(self, label: str):
+        if not self._recording_active:
+            return
+        marker_t = self._current_recording_marker_time()
+        self._pending_csv_events.append((marker_t, label))
+        if self.pressure_plot_widget:
+            self.pressure_plot_widget.add_annotation_marker(marker_t, label)
 
     def _queue_csv_row(self, row):
         if not self._csv_writer:
@@ -642,6 +643,16 @@ class MainWindow(QMainWindow):
         except Exception:
             log.exception("Failed to stop pump")
 
+    @pyqtSlot(str)
+    def _on_add_annotation(self, text: str):
+        """Add a manual annotation marker to the trace."""
+        try:
+            if self._recording_active:
+                self._register_annotation(text)
+                self.statusBar().showMessage(f"Annotation added: {text}", 4000)
+        except Exception:
+            log.exception("Failed to add annotation")
+
     @pyqtSlot()
     def _on_start_recording(self):
         """Clear the plot, open a new CSV file, and begin recording."""
@@ -707,13 +718,18 @@ class MainWindow(QMainWindow):
         return "Pump ON" if running else "Pump OFF"
 
     @classmethod
-    def _build_plot_export_rows(cls, times, pressures, masses, pump_markers):
+    def _build_plot_export_rows(cls, times, pressures, masses, pump_markers, annotation_markers=None):
         """Build CSV rows with marker metadata folded into sample rows."""
+        # Merge pump markers and annotations into a single sorted event list
+        all_events = []
+        for t, running in (pump_markers or []):
+            all_events.append((t, cls._pump_event_label(bool(running)), running))
+        for t, label in (annotation_markers or []):
+            all_events.append((t, label, None))
+        all_events.sort(key=lambda e: e[0])
+
         rows = []
-        sorted_markers = (
-            sorted(pump_markers, key=lambda pair: pair[0]) if pump_markers else []
-        )
-        marker_idx = 0
+        ev_idx = 0
         running = False
         eps = 1e-9
         pending_row = None
@@ -722,31 +738,26 @@ class MainWindow(QMainWindow):
             if pending_row is not None:
                 rows.append(pending_row)
 
-            events_here = []
-            while (
-                marker_idx < len(sorted_markers)
-                and sorted_markers[marker_idx][0] <= t + eps
-            ):
-                marker_t, marker_running = sorted_markers[marker_idx]
-                running = bool(marker_running)
-                events_here.append((marker_t, running))
-                marker_idx += 1
+            labels_here = []
+            while ev_idx < len(all_events) and all_events[ev_idx][0] <= t + eps:
+                _, lbl, ev_running = all_events[ev_idx]
+                if ev_running is not None:
+                    running = bool(ev_running)
+                labels_here.append(lbl)
+                ev_idx += 1
 
             pending_row = cls._build_csv_sample_row(
-                idx=None,
                 t_plot=t,
                 pressure=p,
                 mass=m,
                 pump_running=running,
-                events=events_here,
+                event_labels=labels_here,
             )
 
         if pending_row is not None:
-            if marker_idx < len(sorted_markers):
-                cls._append_events_to_csv_row(
-                    pending_row,
-                    sorted_markers[marker_idx:],
-                )
+            if ev_idx < len(all_events):
+                remaining = [lbl for _, lbl, _ in all_events[ev_idx:]]
+                cls._append_event_labels_to_csv_row(pending_row, remaining)
             rows.append(pending_row)
 
         return rows
@@ -766,6 +777,7 @@ class MainWindow(QMainWindow):
                     data["pressure"],
                     data["mass"],
                     data.get("pump_markers", []),
+                    data.get("annotation_markers", []),
                 )
                 with open(path, "w", newline="") as f:
                     writer = csv.writer(f)
@@ -970,15 +982,14 @@ class MainWindow(QMainWindow):
 
         if self._csv_writer:
             self._finalize_pending_csv_sample_row()
-            pending_events = list(self._pending_csv_events)
+            pending_labels = [lbl for _, lbl in self._pending_csv_events]
             self._pending_csv_events.clear()
             self._pending_csv_sample_row = self._build_csv_sample_row(
-                idx=idx,
                 t_plot=t_plot,
                 pressure=p,
                 mass=mass,
                 pump_running=self._pump_running,
-                events=pending_events,
+                event_labels=pending_labels,
             )
 
         if self.dock_console.isVisible() and (

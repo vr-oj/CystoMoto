@@ -142,6 +142,10 @@ class PressurePlotWidget(QWidget):
         self._pump_marker_data = []  # list of (t: float, running: bool)
         self._pump_markers = []      # list of artist tuples — rebuilt on layout change
 
+        # Annotation markers
+        self._annotation_marker_data = []  # list of (t: float, label: str)
+        self._annotation_markers = []
+
         # Layout mode
         self._layout_mode = "stacked"
 
@@ -157,6 +161,7 @@ class PressurePlotWidget(QWidget):
         """Clear the figure and recreate both axes for the given layout mode."""
         self.fig.clear()
         self._pump_markers = []  # artists are gone after fig.clear()
+        self._annotation_markers = []
 
         if mode == "stacked":
             gs = self.fig.add_gridspec(2, 1, height_ratios=[1, 1])
@@ -290,6 +295,8 @@ class PressurePlotWidget(QWidget):
         # Re-draw pump markers from stored data
         for t, running in self._pump_marker_data:
             self._draw_pump_marker(t, running)
+        for t, label in self._annotation_marker_data:
+            self._draw_annotation_marker(t, label)
 
         self.canvas.draw_idle()
 
@@ -411,14 +418,26 @@ class PressurePlotWidget(QWidget):
         del self.pressures[:keep_from]
         del self.masses[:keep_from]
 
-        if self._pump_marker_data and self.times:
+        if self.times:
             min_t = self.times[0]
-            kept_markers = [(t, running) for (t, running) in self._pump_marker_data if t >= min_t]
-            if len(kept_markers) != len(self._pump_marker_data):
-                self._pump_marker_data = kept_markers
+            needs_redraw = False
+            if self._pump_marker_data:
+                kept_markers = [(t, running) for (t, running) in self._pump_marker_data if t >= min_t]
+                if len(kept_markers) != len(self._pump_marker_data):
+                    self._pump_marker_data = kept_markers
+                    needs_redraw = True
+            if self._annotation_marker_data:
+                kept_ann = [(t, lbl) for (t, lbl) in self._annotation_marker_data if t >= min_t]
+                if len(kept_ann) != len(self._annotation_marker_data):
+                    self._annotation_marker_data = kept_ann
+                    needs_redraw = True
+            if needs_redraw:
                 self._clear_pump_markers()
+                self._clear_annotation_markers()
                 for mt, mr in self._pump_marker_data:
                     self._draw_pump_marker(mt, mr)
+                for mt, ml in self._annotation_marker_data:
+                    self._draw_annotation_marker(mt, ml)
 
     def _refresh_plot_view(self, auto_x, auto_y_pressure, auto_y_mass, force_redraw=False):
         self._auto_x_enabled = bool(auto_x)
@@ -753,6 +772,52 @@ class PressurePlotWidget(QWidget):
                     pass
         self._pump_markers.clear()
 
+    # ── Annotation markers ────────────────────────────────────────────────────
+
+    _ANNOTATION_COLOR = "#4C78A8"
+
+    def add_annotation_marker(self, t: float, label: str, redraw: bool = True):
+        self._annotation_marker_data.append((t, label))
+        self._draw_annotation_marker(t, label)
+        if redraw:
+            self.canvas.draw_idle()
+
+    def _draw_annotation_marker(self, t: float, label: str):
+        color = self._ANNOTATION_COLOR
+        prev_xlim_pressure = self.ax_pressure.get_xlim()
+        prev_xlim_mass = self.ax_mass.get_xlim()
+
+        def _vline_and_label(ax):
+            line = ax.axvline(
+                x=t, color=color, linestyle=":", linewidth=1.5, alpha=0.85, zorder=3
+            )
+            line.set_in_layout(False)
+            txt = ax.text(
+                t, 0.98, f" {label}",
+                color=color, fontsize=8, fontweight="bold",
+                rotation=90, va="top", ha="right",
+                transform=ax.get_xaxis_transform(), zorder=4,
+            )
+            txt.set_clip_on(True)
+            txt.set_clip_path(ax.patch)
+            txt.set_in_layout(False)
+            return line, txt
+
+        lp, tp = _vline_and_label(self.ax_pressure)
+        lm, tm = _vline_and_label(self.ax_mass)
+        self._annotation_markers.append((lp, tp, lm, tm))
+        self.ax_pressure.set_xlim(prev_xlim_pressure)
+        self.ax_mass.set_xlim(prev_xlim_mass)
+
+    def _clear_annotation_markers(self):
+        for lp, tp, lm, tm in self._annotation_markers:
+            for artist in (lp, tp, lm, tm):
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+        self._annotation_markers.clear()
+
     # ── Clear / export ────────────────────────────────────────────────────────
 
     def clear_plot(self):
@@ -764,6 +829,8 @@ class PressurePlotWidget(QWidget):
         self.scrollbar.hide()
         self._clear_pump_markers()
         self._pump_marker_data.clear()
+        self._clear_annotation_markers()
+        self._annotation_marker_data.clear()
 
         self.line_pressure.set_data([], [])
         self.line_mass.set_data([], [])
@@ -795,6 +862,7 @@ class PressurePlotWidget(QWidget):
             "pressure": list(self.pressures),
             "mass": list(self.masses),
             "pump_markers": list(self._pump_marker_data),
+            "annotation_markers": list(self._annotation_marker_data),
         }
 
     def export_as_image(self):

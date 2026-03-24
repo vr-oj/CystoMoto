@@ -147,6 +147,10 @@ else:
             self._pump_marker_data = []  # list[(t: float, running: bool)]
             self._pump_markers = []
 
+            # Annotation markers
+            self._annotation_marker_data = []  # list[(t: float, label: str)]
+            self._annotation_markers = []
+
             # Layout + autoscale state
             self._layout_mode = "stacked"
             self._auto_x_enabled = False
@@ -169,6 +173,7 @@ else:
         def _rebuild_axes(self, mode: str):
             self.graphics.clear()
             self._pump_markers = []
+            self._annotation_markers = []
             self._configure_graphics_layout(mode)
 
             if mode == "stacked":
@@ -556,12 +561,21 @@ else:
             del self.pressures[:keep_from]
             del self.masses[:keep_from]
 
+            needs_redraw = False
             if self._pump_marker_data:
                 kept = [(t, running) for (t, running) in self._pump_marker_data if t >= min_t]
                 if len(kept) != len(self._pump_marker_data):
                     self._pump_marker_data = kept
-                    self._clear_pump_markers()
-                    self._redraw_all_markers()
+                    needs_redraw = True
+            if self._annotation_marker_data:
+                kept_ann = [(t, lbl) for (t, lbl) in self._annotation_marker_data if t >= min_t]
+                if len(kept_ann) != len(self._annotation_marker_data):
+                    self._annotation_marker_data = kept_ann
+                    needs_redraw = True
+            if needs_redraw:
+                self._clear_pump_markers()
+                self._clear_annotation_markers()
+                self._redraw_all_markers()
 
         def _refresh_plot_view(self, auto_x, auto_y_pressure, auto_y_mass, force_redraw=False):
             self._auto_x_enabled = bool(auto_x)
@@ -858,7 +872,7 @@ else:
             marker["txt_m"].setPos(t, max(ym0, ym1))
 
         def _reposition_marker_labels(self, pressure: bool):
-            for marker in self._pump_markers:
+            for marker in self._pump_markers + self._annotation_markers:
                 t = marker["t"]
                 if pressure:
                     y0, y1 = self.ax_pressure.viewRange()[1]
@@ -870,6 +884,8 @@ else:
         def _redraw_all_markers(self):
             for t, running in self._pump_marker_data:
                 self._draw_pump_marker(t, running)
+            for t, label in self._annotation_marker_data:
+                self._draw_annotation_marker(t, label)
 
         def _clear_pump_markers(self):
             for marker in self._pump_markers:
@@ -888,6 +904,68 @@ else:
                         pass
             self._pump_markers.clear()
 
+        # ── Annotation markers ────────────────────────────────────────────────
+
+        _ANNOTATION_COLOR = "#4C78A8"
+
+        def add_annotation_marker(self, t: float, label: str, redraw: bool = True):
+            self._annotation_marker_data.append((t, label))
+            self._draw_annotation_marker(t, label)
+            if redraw:
+                self._reposition_marker_labels(pressure=True)
+                self._reposition_marker_labels(pressure=False)
+
+        def _draw_annotation_marker(self, t: float, label: str):
+            color = self._ANNOTATION_COLOR
+            pen = pg.mkPen(color=color, width=1.5, style=Qt.DotLine)
+
+            line_p = pg.InfiniteLine(pos=t, angle=90, pen=pen, movable=False)
+            line_m = pg.InfiniteLine(pos=t, angle=90, pen=pen, movable=False)
+            self.ax_pressure.addItem(line_p, ignoreBounds=True)
+            self.ax_mass.addItem(line_m, ignoreBounds=True)
+
+            txt_p = pg.TextItem(f" {label}", color=color, anchor=(1, 0))
+            txt_m = pg.TextItem(f" {label}", color=color, anchor=(1, 0))
+            txt_p.setZValue(9)
+            txt_m.setZValue(9)
+            self.ax_pressure.addItem(txt_p, ignoreBounds=True)
+            self.ax_mass.addItem(txt_m, ignoreBounds=True)
+
+            marker = {
+                "t": t,
+                "label": label,
+                "line_p": line_p,
+                "line_m": line_m,
+                "txt_p": txt_p,
+                "txt_m": txt_m,
+            }
+            self._annotation_markers.append(marker)
+            self._position_single_marker_label(marker)
+
+            x0, x1 = self.ax_pressure.viewRange()[0]
+            self._safe_set_xrange(x0, x1)
+
+        def _redraw_all_annotation_markers(self):
+            for t, label in self._annotation_marker_data:
+                self._draw_annotation_marker(t, label)
+
+        def _clear_annotation_markers(self):
+            for marker in self._annotation_markers:
+                for key, ax in (
+                    ("line_p", self.ax_pressure),
+                    ("txt_p", self.ax_pressure),
+                    ("line_m", self.ax_mass),
+                    ("txt_m", self.ax_mass),
+                ):
+                    item = marker.get(key)
+                    if item is None:
+                        continue
+                    try:
+                        ax.removeItem(item)
+                    except Exception:
+                        pass
+            self._annotation_markers.clear()
+
         # ── Clear / export ─────────────────────────────────────────────────────
 
         def clear_plot(self):
@@ -899,6 +977,8 @@ else:
             self.scrollbar.hide()
             self._clear_pump_markers()
             self._pump_marker_data.clear()
+            self._clear_annotation_markers()
+            self._annotation_marker_data.clear()
 
             self.line_pressure.setData([], [])
             self.line_mass.setData([], [])
@@ -928,6 +1008,7 @@ else:
                 "pressure": list(self.pressures),
                 "mass": list(self.masses),
                 "pump_markers": list(self._pump_marker_data),
+                "annotation_markers": list(self._annotation_marker_data),
             }
 
         def _build_export_figure(self):
@@ -1003,6 +1084,33 @@ else:
                     )
                     txt.set_clip_on(True)
                     txt.set_clip_path(ax.patch)
+
+            for t, label in self._annotation_marker_data:
+                color = self._ANNOTATION_COLOR
+                for ax in (ax_pressure, ax_mass):
+                    ax.axvline(
+                        x=t,
+                        color=color,
+                        linestyle=":",
+                        linewidth=1.5,
+                        alpha=0.85,
+                        zorder=3,
+                    )
+                    atxt = ax.text(
+                        t,
+                        0.98,
+                        f" {label}",
+                        color=color,
+                        fontsize=8,
+                        fontweight="bold",
+                        rotation=90,
+                        va="top",
+                        ha="right",
+                        transform=ax.get_xaxis_transform(),
+                        zorder=4,
+                    )
+                    atxt.set_clip_on(True)
+                    atxt.set_clip_path(ax.patch)
 
             if not self.times:
                 ax_pressure.text(

@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
 )
 from PyQt5.QtCore import pyqtSignal
@@ -27,6 +28,7 @@ class PumpControlPanel(QGroupBox):
     pump_stop_requested = pyqtSignal()
     record_start_requested = pyqtSignal()
     record_stop_requested = pyqtSignal()
+    annotation_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__("Pump & Recording", parent)
@@ -74,6 +76,28 @@ class PumpControlPanel(QGroupBox):
         pump_row.addWidget(self.stop_btn)
         layout.addRow("Pump:", pump_row)
 
+        # ── Annotation row ───────────────────────────────────────────────────
+        self.annotation_input = QLineEdit()
+        self.annotation_input.setPlaceholderText("Type annotation…")
+        self.annotation_input.setEnabled(False)
+        self.annotation_input.returnPressed.connect(self._submit_annotation)
+
+        self.annotation_btn = QPushButton("Add")
+        self.annotation_btn.setEnabled(False)
+        self.annotation_btn.setToolTip("Add a manual annotation marker to the trace.")
+        self.annotation_btn.clicked.connect(self._submit_annotation)
+
+        ann_row = QHBoxLayout()
+        ann_row.addWidget(self.annotation_input, 1)
+        ann_row.addWidget(self.annotation_btn)
+        layout.addRow("Annotate:", ann_row)
+
+    def _submit_annotation(self):
+        text = self.annotation_input.text().strip()
+        if text:
+            self.annotation_requested.emit(text)
+            self.annotation_input.clear()
+
     def update_connection_status(self, connected: bool):
         """Enable/disable controls on device connect or disconnect."""
         if not connected:
@@ -96,3 +120,7 @@ class PumpControlPanel(QGroupBox):
         """Toggle recording buttons."""
         self.rec_start_btn.setEnabled(not recording)
         self.rec_stop_btn.setEnabled(recording)
+        self.annotation_input.setEnabled(recording)
+        self.annotation_btn.setEnabled(recording)
+        if not recording:
+            self.annotation_input.clear()
