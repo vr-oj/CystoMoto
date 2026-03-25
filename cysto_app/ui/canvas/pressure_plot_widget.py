@@ -151,6 +151,12 @@ else:
             self._annotation_marker_data = []  # list[(t: float, label: str)]
             self._annotation_markers = []
 
+            # Incremental min/max tracking for auto-scale (avoids O(n) scan every frame)
+            self._p_min = float("inf")
+            self._p_max = float("-inf")
+            self._m_min = float("inf")
+            self._m_max = float("-inf")
+
             # Layout + autoscale state
             self._layout_mode = "stacked"
             self._auto_x_enabled = False
@@ -353,11 +359,11 @@ else:
                 self._safe_set_xrange(xmin, xmax)
                 self._update_scrollbar()
 
-            # Pressure Y-range
+            # Pressure Y-range (use cached min/max — O(1) instead of O(n))
             if auto_y_pressure:
                 self.manual_ylim_pressure = None
-                if self.pressures:
-                    mn, mx = min(self.pressures), max(self.pressures)
+                if self.pressures and self._p_min <= self._p_max:
+                    mn, mx = self._p_min, self._p_max
                     pad = max(abs(mx - mn) * 0.1, 2.0)
                     self._safe_set_yrange(self.ax_pressure, mn - pad, mx + pad)
                 else:
@@ -369,19 +375,19 @@ else:
             else:
                 if self.manual_ylim_pressure:
                     ymin, ymax = self.manual_ylim_pressure
-                elif self.pressures:
-                    mn, mx = min(self.pressures), max(self.pressures)
+                elif self.pressures and self._p_min <= self._p_max:
+                    mn, mx = self._p_min, self._p_max
                     pad = max(abs(mx - mn) * 0.1, 2.0)
                     ymin, ymax = (mn - pad, mx + pad)
                 else:
                     ymin, ymax = (PLOT_DEFAULT_Y_MIN, PLOT_DEFAULT_Y_MAX)
                 self._safe_set_yrange(self.ax_pressure, ymin, ymax)
 
-            # Mass Y-range
+            # Mass Y-range (use cached min/max)
             if auto_y_mass:
                 self.manual_ylim_mass = None
-                if self.masses:
-                    mn, mx = min(self.masses), max(self.masses)
+                if self.masses and self._m_min <= self._m_max:
+                    mn, mx = self._m_min, self._m_max
                     pad = max(abs(mx - mn) * 0.1, 1.0)
                     self._safe_set_yrange(self.ax_mass, mn - pad, mx + pad)
                 else:
@@ -393,8 +399,8 @@ else:
             else:
                 if self.manual_ylim_mass:
                     ymin, ymax = self.manual_ylim_mass
-                elif self.masses:
-                    mn, mx = min(self.masses), max(self.masses)
+                elif self.masses and self._m_min <= self._m_max:
+                    mn, mx = self._m_min, self._m_max
                     pad = max(abs(mx - mn) * 0.1, 1.0)
                     ymin, ymax = (mn - pad, mx + pad)
                 else:
@@ -547,6 +553,21 @@ else:
 
         # ── Plot update ────────────────────────────────────────────────────────
 
+        def _recompute_minmax(self):
+            """Recompute cached min/max after data trimming."""
+            if self.pressures:
+                self._p_min = min(self.pressures)
+                self._p_max = max(self.pressures)
+            else:
+                self._p_min = float("inf")
+                self._p_max = float("-inf")
+            if self.masses:
+                self._m_min = min(self.masses)
+                self._m_max = max(self.masses)
+            else:
+                self._m_min = float("inf")
+                self._m_max = float("-inf")
+
         def _trim_history_if_needed(self):
             if self.max_points <= 0:
                 return
@@ -560,6 +581,9 @@ else:
             del self.times[:keep_from]
             del self.pressures[:keep_from]
             del self.masses[:keep_from]
+
+            # Recompute cached min/max after discarding old data
+            self._recompute_minmax()
 
             needs_redraw = False
             if self._pump_marker_data:
@@ -598,6 +622,15 @@ else:
                 self.times.append(t)
                 self.pressures.append(p)
                 self.masses.append(mass)
+                # Incremental min/max tracking
+                if p < self._p_min:
+                    self._p_min = p
+                if p > self._p_max:
+                    self._p_max = p
+                if mass < self._m_min:
+                    self._m_min = mass
+                if mass > self._m_max:
+                    self._m_max = mass
 
             if dropped:
                 log.warning(
@@ -972,6 +1005,10 @@ else:
             self.times.clear()
             self.pressures.clear()
             self.masses.clear()
+            self._p_min = float("inf")
+            self._p_max = float("-inf")
+            self._m_min = float("inf")
+            self._m_max = float("-inf")
             self.manual_xlim = None
             self._manual_x_override = False
             self.scrollbar.hide()

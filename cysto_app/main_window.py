@@ -58,10 +58,12 @@ from ui.control_panels.plot_control_panel import PlotControlPanel
 from ui.control_panels.pump_control_panel import PumpControlPanel
 from ui.canvas.pressure_plot_widget import PressurePlotWidget
 from ui.run_metadata_dialog import RunMetadataDialog
+from ui.run_viewer_window import RunViewerWindow
 
 from threads.serial_thread import SerialThread
 from utils.utils import list_serial_ports, timestamped_filename
 from utils.path_helpers import get_next_fill_folder
+from utils.csv_loader import load_run_csv, load_run_metadata
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +90,7 @@ class MainWindow(QMainWindow):
         self.top_ctrl = None
         self.pump_ctrl = None
         self.pressure_plot_widget = None
+        self._viewer_windows = []
 
         # Recording state
         self._pump_running = False
@@ -263,6 +266,13 @@ class MainWindow(QMainWindow):
     def _build_menus(self):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
+        open_run_act = QAction(
+            "&Open Run\u2026", self,
+            shortcut=QKeySequence.Open,
+            triggered=self._open_previous_run,
+        )
+        fm.addAction(open_run_act)
+        fm.addSeparator()
         exp_data_act = QAction(
             "Export Plot &Data (CSV)…", self, triggered=self._export_plot_data_as_csv
         )
@@ -811,6 +821,29 @@ class MainWindow(QMainWindow):
         if details:
             dlg.setDetailedText(details)
         dlg.exec_()
+
+    def _open_previous_run(self):
+        """Open a previously recorded CSV in a viewer window."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Recorded Run",
+            config.CYSTO_RESULTS_DIR,
+            "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            run_data = load_run_csv(path)
+            metadata = load_run_metadata(path)
+            viewer = RunViewerWindow(path, run_data, metadata, parent=None)
+            self._viewer_windows.append(viewer)
+            viewer.destroyed.connect(lambda: self._viewer_windows.remove(viewer) if viewer in self._viewer_windows else None)
+            viewer.show()
+        except Exception as e:
+            log.exception("Failed to open run: %s", path)
+            QMessageBox.critical(
+                self, "Open Run Error", f"Could not open run file:\n{e}"
+            )
 
     def _show_about_dialog(self):
         QMessageBox.information(self, f"About {APP_NAME}", ABOUT_TEXT)

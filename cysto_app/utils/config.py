@@ -42,7 +42,7 @@ and allows exporting of synchronized CSV logs.</p>
 LOG_LEVEL = "DEBUG"  # DEBUG, INFO, WARNING, ERROR
 
 # ─── Plotting ──────────────────────────────────────────────────────────────────
-PLOT_MAX_POINTS = 0  # 0 keeps the full trace in memory; positive values enable trimming
+PLOT_MAX_POINTS = 108000  # ~90 min at 20 Hz; covers a full run with margin
 PLOT_DEFAULT_Y_MIN = -5
 PLOT_DEFAULT_Y_MAX = 30  # Typical pressure range in mmHg
 PLOT_DEFAULT_MASS_Y_MIN = 0
