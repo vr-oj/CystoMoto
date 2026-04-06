@@ -7,11 +7,17 @@
 ; This script expects PyInstaller to have produced dist\CystoMoto\ first.
 
 #define MyAppName        "CystoMoto"
-#define MyAppVersion     "1.0.0"
 #define MyAppPublisher   "CystoMoto"
-#define MyAppURL         "https://github.com/your-org/CystoMoto"
 #define MyAppExeName     "CystoMoto.exe"
 #define MyAppDescription "Live Pressure Data Logger for Cystometry"
+
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
+
+#ifndef MyAppURL
+  #define MyAppURL "https://github.com/valdovegarodr/CystoMoto"
+#endif
 
 ; Relative path from installer\windows\ to the PyInstaller one-dir output
 #define DistPath "..\..\dist\CystoMoto"
@@ -48,6 +54,7 @@ SolidCompression=yes
 WizardStyle=modern
 
 ; ── Architecture ─────────────────────────────────────────────────────────────
+ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
 ; ── Appearance ────────────────────────────────────────────────────────────────

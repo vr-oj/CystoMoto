@@ -61,39 +61,46 @@ Download the latest release for your platform from the [Releases page](../../rel
 
 ---
 
-## Building a macOS Release Manually (for Intel Macs)
+## Building a macOS Release Locally (Intel + Apple Silicon)
 
-The automated CI only builds for Apple Silicon (arm64). To include an Intel macOS DMG in a release, build it manually on an Intel Mac and upload it alongside the CI-generated artifacts.
+You can build both macOS installers locally from an Apple Silicon Mac using two venvs:
+- `.cystomoto` for `arm64`
+- `.cystomoto_x86` for `x86_64` (run under Rosetta)
 
-**Requirements:** Python 3.10+, Homebrew
+**Requirements:** Python environments with dependencies installed, Homebrew `create-dmg`
 
 ```bash
-# 1. Install build tools
-pip install pyinstaller pillow
-pip install -r cysto_app/requirements.txt
+# 1) Install dependencies in both envs (run once)
+./.cystomoto/bin/pip install pyinstaller pillow
+./.cystomoto/bin/pip install -r cysto_app/requirements.txt
+
+arch -x86_64 ./.cystomoto_x86/bin/pip install pyinstaller pillow
+arch -x86_64 ./.cystomoto_x86/bin/pip install -r cysto_app/requirements.txt
+
 brew install create-dmg
 
-# 2. Patch the version number (replace 1.0.0 with the release version)
-VERSION="1.0.0"
-sed -i '' "s/APP_VERSION = \"[^\"]*\"/APP_VERSION = \"$VERSION\"/" cysto_app/utils/config.py
-sed -i '' "s/APP_VERSION=\"[^\"]*\"/APP_VERSION=\"$VERSION\"/" build_macos.sh
-sed -i '' "s/version=\"[^\"]*\"/version=\"$VERSION\"/" CystoMoto_macos.spec
-sed -i '' "s/\"CFBundleVersion\": \"[^\"]*\"/\"CFBundleVersion\": \"$VERSION\"/" CystoMoto_macos.spec
-sed -i '' "s/\"CFBundleShortVersionString\": \"[^\"]*\"/\"CFBundleShortVersionString\": \"$VERSION\"/" CystoMoto_macos.spec
-
-# 3. Build
-chmod +x build_macos.sh
-./build_macos.sh
+# 2) Build both DMGs
+./build_macos.sh --arch all --version 1.0.0
 ```
 
-This produces `installer_output/CystoMoto_<version>_macOS_x86_64.dmg`.
+This produces:
+- `installer_output/CystoMoto_<version>_macOS_arm64.dmg`
+- `installer_output/CystoMoto_<version>_macOS_x86_64.dmg`
 
-**Upload to the release:**
-1. Go to the repo → **Releases** → open the draft release for this version.
-2. Drag and drop the `.dmg` into the assets area.
-3. Publish the release.
+### Notarized public release (recommended)
 
-> To verify your architecture before building, run `uname -m`. It should print `x86_64` for Intel.
+For a public GitHub release where users can open the app without Gatekeeper friction, sign with **Developer ID** and notarize:
+
+```bash
+export CYSTOMOTO_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export CYSTOMOTO_NOTARY_APPLE_ID="you@example.com"
+export CYSTOMOTO_NOTARY_TEAM_ID="TEAMID"
+export CYSTOMOTO_NOTARY_PASSWORD="app-specific-password"
+
+./build_macos.sh --arch all --version 1.0.0 --notarize
+```
+
+Upload both DMGs to your GitHub release assets.
 
 ---
 
