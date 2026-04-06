@@ -1,8 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build specification for CystoMoto - macOS.
 
-Produces a .app bundle in dist/CystoMoto.app which build_macos.sh
-wraps into a .dmg using create-dmg.
+Produces a .app bundle for local packaging into a .dmg by build_macos.sh.
 Run from the repository root: pyinstaller CystoMoto_macos.spec --noconfirm
 """
 
@@ -10,6 +9,10 @@ import os
 
 source_script = os.path.join("cysto_app", "cysto_app.py")
 icon_file = os.path.join("cysto_app", "ui", "icons", "CystoMoto.icns")
+
+app_version = os.environ.get("CYSTOMOTO_VERSION", "1.0.0")
+bundle_identifier = os.environ.get("CYSTOMOTO_BUNDLE_ID", "com.cystomoto.app")
+minimum_macos = os.environ.get("CYSTOMOTO_MIN_MACOS", "10.14")
 
 data_files = [
     (
@@ -51,12 +54,12 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,          # UPX corrupts Qt dylibs on macOS — always leave off
+    upx=False,  # UPX can corrupt Qt dylibs on macOS
     upx_exclude=[],
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=True,    # Enables drag-and-drop onto Dock icon
-    target_arch=None,       # None = build for current arch (arm64 on macos-latest, x86_64 on macos-13)
+    argv_emulation=True,  # Enables drag-and-drop onto Dock icon
+    target_arch=None,  # None = current python arch
     codesign_identity=None,
     entitlements_file=None,
     icon=icon_file,
@@ -77,18 +80,18 @@ app = BUNDLE(
     coll,
     name="CystoMoto.app",
     icon=icon_file,
-    bundle_identifier="com.cystomoto.app",
-    version="1.0.0",
+    bundle_identifier=bundle_identifier,
+    version=app_version,
     info_plist={
         "CFBundleName": "CystoMoto",
         "CFBundleDisplayName": "CystoMoto",
-        "CFBundleVersion": "1.0.0",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleIdentifier": "com.cystomoto.app",
+        "CFBundleVersion": app_version,
+        "CFBundleShortVersionString": app_version,
+        "CFBundleIdentifier": bundle_identifier,
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "CC BY-NC-SA 4.0",
-        "LSMinimumSystemVersion": "10.14",
+        "LSMinimumSystemVersion": minimum_macos,
         "NSPrincipalClass": "NSApplication",
-        "NSRequiresAquaSystemAppearance": False,  # Respect system dark mode
+        "NSRequiresAquaSystemAppearance": False,
     },
 )
