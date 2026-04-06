@@ -55,6 +55,9 @@ class PlotControlPanel(QGroupBox):
         # X-axis
         self.auto_x_cb = QCheckBox("Auto-scale X")
         self.auto_x_cb.setChecked(False)
+        self.auto_x_cb.setToolTip(
+            "Fit the full trace on the X-axis. Turn off to use a trailing window or manual X limits."
+        )
         form.addRow(self.auto_x_cb)
 
         self.window_duration_spin = QSpinBox()
@@ -62,6 +65,9 @@ class PlotControlPanel(QGroupBox):
         self.window_duration_spin.setValue(60)
         self.window_duration_spin.setSuffix(" s")
         self.window_duration_spin.setMaximumWidth(80)
+        self.window_duration_spin.setToolTip(
+            "Trailing live window while Auto-scale X is off and no manual X limits are set."
+        )
         form.addRow("Window:", self.window_duration_spin)
 
         self.x_min = QDoubleSpinBox()

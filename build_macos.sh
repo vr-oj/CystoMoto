@@ -12,7 +12,7 @@
 set -euo pipefail
 
 APP_NAME="CystoMoto"
-APP_VERSION="0.0.0"
+APP_VERSION="1.0.0"
 ICON_DIR="cysto_app/ui/icons"
 ICO_FILE="${ICON_DIR}/CystoMoto.ico"
 ICNS_FILE="${ICON_DIR}/CystoMoto.icns"

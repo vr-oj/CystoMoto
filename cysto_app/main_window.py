@@ -4,8 +4,10 @@ import os
 import sys
 import logging
 import csv
+import json
 import subprocess
 import time
+from datetime import datetime
 from collections import deque
 
 from PyQt5.QtWidgets import (
@@ -40,6 +42,7 @@ from utils.app_settings import (
     load_app_setting,
     SETTING_RESULTS_DIR,
     SETTING_OPEN_FOLDER_PROMPT,
+    SETTING_RUN_METADATA_DEFAULTS,
 )
 import utils.config as config
 from utils.config import (
@@ -49,16 +52,29 @@ from utils.config import (
     ABOUT_TEXT,
 )
 from utils.path_helpers import resource_path
+from utils.icon_helpers import load_icon
 from ui.control_panels.top_control_panel import TopControlPanel
 from ui.control_panels.plot_control_panel import PlotControlPanel
 from ui.control_panels.pump_control_panel import PumpControlPanel
 from ui.canvas.pressure_plot_widget import PressurePlotWidget
+from ui.run_metadata_dialog import RunMetadataDialog
+from ui.run_viewer_window import RunViewerWindow
 
 from threads.serial_thread import SerialThread
 from utils.utils import list_serial_ports, timestamped_filename
 from utils.path_helpers import get_next_fill_folder
+from utils.csv_loader import load_run_csv, load_run_metadata
 
 log = logging.getLogger(__name__)
+
+CSV_HEADER = [
+    "Time (s)",
+    "Pressure (mmHg)",
+    "Mass (g)",
+    "Pump Running",
+    "Event",
+]
+CSV_EVENT_COL = 4
 
 
 class MainWindow(QMainWindow):
@@ -74,6 +90,7 @@ class MainWindow(QMainWindow):
         self.top_ctrl = None
         self.pump_ctrl = None
         self.pressure_plot_widget = None
+        self._viewer_windows = []
 
         # Recording state
         self._pump_running = False
@@ -81,10 +98,14 @@ class MainWindow(QMainWindow):
         self._csv_file = None
         self._csv_writer = None
         self._recording_path = None
+        self._recording_metadata_path = None
+        self._recording_metadata = {}
         self._last_data_time: float = 0.0
+        self._recording_time_origin: float | None = None
         self._t_offset: float = 0.0   # accumulated offset from Arduino timer resets
         self._last_raw_t: float = 0.0  # last raw t received from Arduino
-        self._pending_pump_marker_events = deque()  # queued bools: True=ON, False=OFF
+        self._pending_csv_events = deque()  # queued tuples[(marker_time, label_str)]
+        self._pending_csv_sample_row = None
         self._pending_plot_samples = []  # list[(t, p, mass)] waiting for batched draw
         self._csv_row_buffer = []  # buffered CSV rows to reduce per-packet file I/O
 
@@ -133,7 +154,7 @@ class MainWindow(QMainWindow):
 
         def get_icon(name):
             path = os.path.join(icon_dir, name)
-            return QIcon(path) if os.path.exists(path) else QIcon()
+            return load_icon(path) if os.path.exists(path) else QIcon()
 
         self.icon_connect = get_icon("plug.svg")
         self.icon_disconnect = get_icon("plug_disconnect.svg")
@@ -181,6 +202,7 @@ class MainWindow(QMainWindow):
         self.pump_ctrl.pump_stop_requested.connect(self._on_stop_pump)
         self.pump_ctrl.record_start_requested.connect(self._on_start_recording)
         self.pump_ctrl.record_stop_requested.connect(self._on_stop_recording)
+        self.pump_ctrl.annotation_requested.connect(self._on_add_annotation)
         top_row_lay.addWidget(self.pump_ctrl, stretch=1)
 
         self.plot_control_panel = PlotControlPanel(self)
@@ -213,9 +235,13 @@ class MainWindow(QMainWindow):
             )
         )
         pc.export_plot_image_requested.connect(pw.export_as_image)
-        pc.clear_plot_requested.connect(pw.clear_plot)
+        pc.clear_plot_requested.connect(self._clear_pressure_plot)
         pc.layout_changed.connect(pw.set_layout)
         pc.window_duration_changed.connect(pw.set_window_duration)
+        if hasattr(pw, "manual_x_mode_requested"):
+            pw.manual_x_mode_requested.connect(
+                lambda: pc.auto_x_cb.isChecked() and pc.auto_x_cb.setChecked(False)
+            )
 
         self.setCentralWidget(central)
 
@@ -240,6 +266,13 @@ class MainWindow(QMainWindow):
     def _build_menus(self):
         mb = self.menuBar()
         fm = mb.addMenu("&File")
+        open_run_act = QAction(
+            "&Open Run\u2026", self,
+            shortcut=QKeySequence.Open,
+            triggered=self._open_previous_run,
+        )
+        fm.addAction(open_run_act)
+        fm.addSeparator()
         exp_data_act = QAction(
             "Export Plot &Data (CSV)…", self, triggered=self._export_plot_data_as_csv
         )
@@ -356,7 +389,6 @@ class MainWindow(QMainWindow):
             self.pressure_plot_widget, "clear_plot"
         ):
             self._pending_plot_samples.clear()
-            self._pending_pump_marker_events.clear()
             self.pressure_plot_widget.clear_plot()
             self.statusBar().showMessage("Pressure plot data cleared.", 3000)
 
@@ -368,7 +400,6 @@ class MainWindow(QMainWindow):
                 self.pressure_plot_widget, "clear_plot"
             ):
                 self._pending_plot_samples.clear()
-                self._pending_pump_marker_events.clear()
                 self.pressure_plot_widget.clear_plot()
 
             if self._serial_thread and self._serial_thread.isRunning():
@@ -383,37 +414,96 @@ class MainWindow(QMainWindow):
 
     # ─── Recording helpers ───────────────────────────────────────────────────
 
-    def _start_recording(self):
-        """Open a new CSV file in a new FillN folder and begin recording."""
+    def _default_recording_path(self) -> str:
+        fill_folder = get_next_fill_folder(create=False)
+        return os.path.join(fill_folder, timestamped_filename("pressure_data", "csv"))
+
+    @staticmethod
+    def _metadata_path_for_csv(csv_path: str) -> str:
+        stem, _ = os.path.splitext(csv_path)
+        return f"{stem}_metadata.json"
+
+    def _current_serial_port_label(self) -> str:
+        if self._serial_thread and getattr(self._serial_thread, "port", None):
+            return str(self._serial_thread.port)
+        data = self.serial_port_combobox.currentData()
+        if isinstance(data, QVariant):
+            data = data.value()
+        return str(data) if data else ""
+
+    def _prompt_run_setup(self):
+        defaults = load_app_setting(SETTING_RUN_METADATA_DEFAULTS, {})
+        if not isinstance(defaults, dict):
+            defaults = {}
+        dlg = RunMetadataDialog(self._default_recording_path(), defaults, self)
+        if dlg.exec_() != dlg.Accepted:
+            return None
+        run_setup = dlg.get_run_setup()
+        save_app_setting(SETTING_RUN_METADATA_DEFAULTS, run_setup["metadata"])
+        return run_setup
+
+    def _build_run_metadata_payload(self, csv_path: str, run_metadata: dict) -> dict:
+        return {
+            "app_name": APP_NAME,
+            "app_version": APP_VERSION,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "csv_path": csv_path,
+            "device_port": self._current_serial_port_label(),
+            "metadata": dict(run_metadata),
+        }
+
+    def _start_recording(self, csv_path: str, run_metadata: dict):
+        """Open the run CSV and companion metadata file and begin recording."""
+        csv_file = None
+        csv_writer = None
+        metadata_path = self._metadata_path_for_csv(csv_path)
         try:
-            fill_folder = get_next_fill_folder()
-            filename = timestamped_filename("pressure_data", "csv")
-            filepath = os.path.join(fill_folder, filename)
-            self._csv_file = open(filepath, "w", newline="")
-            self._csv_writer = csv.writer(self._csv_file)
-            self._csv_writer.writerow(
-                [
-                    "Row Type",
-                    "Frame Index",
-                    "Time (s)",
-                    "Pressure (mmHg)",
-                    "Mass (g)",
-                    "Pump Running",
-                    "Pump Event",
-                    "Marker Time (s)",
-                ]
-            )
-            self._recording_path = filepath
-            folder_name = os.path.basename(fill_folder)
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+
+            csv_file = open(csv_path, "w", newline="")
+            csv_writer = csv.writer(csv_file)
+            csv_writer.writerow(CSV_HEADER)
+            csv_file.flush()
+
+            with open(metadata_path, "w") as metadata_file:
+                json.dump(
+                    self._build_run_metadata_payload(csv_path, run_metadata),
+                    metadata_file,
+                    indent=2,
+                )
+
+            self._csv_file = csv_file
+            self._csv_writer = csv_writer
+            self._recording_path = csv_path
+            self._recording_metadata_path = metadata_path
+            self._recording_metadata = dict(run_metadata)
             self.statusBar().showMessage(
-                f"Recording started: {folder_name}/{filename}", 5000
+                f"Recording started: {os.path.basename(os.path.dirname(csv_path))}/{os.path.basename(csv_path)}",
+                5000,
             )
-            log.info(f"Recording started: {filepath}")
+            log.info("Recording started: %s", csv_path)
         except Exception:
             log.exception("Failed to start recording")
+            try:
+                if csv_file:
+                    csv_file.close()
+            except Exception:
+                pass
+            try:
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+            except Exception:
+                pass
+            try:
+                if os.path.exists(metadata_path):
+                    os.remove(metadata_path)
+            except Exception:
+                pass
             self._csv_file = None
             self._csv_writer = None
             self._recording_path = None
+            self._recording_metadata_path = None
+            self._recording_metadata = {}
 
     def _stop_recording(self):
         """Flush and close the current CSV recording file."""
@@ -429,6 +519,72 @@ class MainWindow(QMainWindow):
                 self._csv_file = None
                 self._csv_writer = None
                 self._recording_path = None
+                self._recording_metadata_path = None
+                self._recording_metadata = {}
+
+    @classmethod
+    def _append_event_labels_to_csv_row(cls, row, labels):
+        """Append event label strings to the Event column."""
+        if not labels:
+            return
+        combined = ";".join(labels)
+        if row[CSV_EVENT_COL]:
+            row[CSV_EVENT_COL] = f"{row[CSV_EVENT_COL]};{combined}"
+        else:
+            row[CSV_EVENT_COL] = combined
+
+    @classmethod
+    def _build_csv_sample_row(cls, t_plot, pressure, mass, pump_running, event_labels=None):
+        row = [
+            f"{t_plot:.4f}",
+            f"{pressure:.4f}",
+            f"{mass:.4f}",
+            1 if pump_running else 0,
+            "",
+        ]
+        cls._append_event_labels_to_csv_row(row, event_labels or [])
+        return row
+
+    def _finalize_pending_csv_sample_row(self):
+        if self._pending_csv_sample_row is None:
+            return
+        self._queue_csv_row(self._pending_csv_sample_row)
+        self._pending_csv_sample_row = None
+
+    def _attach_pending_events_to_pending_row(self):
+        if not self._pending_csv_events:
+            return
+        labels = [lbl for _, lbl in self._pending_csv_events]
+        self._pending_csv_events.clear()
+        if self._pending_csv_sample_row is None:
+            log.warning(
+                "Dropping %d pending events because there is no sample row to attach them to.",
+                len(labels),
+            )
+            return
+        self._append_event_labels_to_csv_row(self._pending_csv_sample_row, labels)
+
+    def _current_recording_marker_time(self) -> float:
+        if self._recording_time_origin is None:
+            return 0.0
+        return max(0.0, self._last_data_time - self._recording_time_origin)
+
+    def _register_pump_event(self, running: bool):
+        if not self._recording_active:
+            return
+        marker_t = self._current_recording_marker_time()
+        label = self._pump_event_label(running)
+        self._pending_csv_events.append((marker_t, label))
+        if self.pressure_plot_widget:
+            self.pressure_plot_widget.add_pump_marker(marker_t, running)
+
+    def _register_annotation(self, label: str):
+        if not self._recording_active:
+            return
+        marker_t = self._current_recording_marker_time()
+        self._pending_csv_events.append((marker_t, label))
+        if self.pressure_plot_widget:
+            self.pressure_plot_widget.add_annotation_marker(marker_t, label)
 
     def _queue_csv_row(self, row):
         if not self._csv_writer:
@@ -474,7 +630,7 @@ class MainWindow(QMainWindow):
             self._pump_running = True
             self.pump_ctrl.update_pump_state(True)
             if self._recording_active:
-                self._pending_pump_marker_events.append(True)
+                self._register_pump_event(True)
 
             if self._serial_thread and self._serial_thread.isRunning():
                 self._serial_thread.send_command("G")
@@ -489,7 +645,7 @@ class MainWindow(QMainWindow):
             self._pump_running = False
             self.pump_ctrl.update_pump_state(False)
             if self._recording_active:
-                self._pending_pump_marker_events.append(False)
+                self._register_pump_event(False)
 
             if self._serial_thread and self._serial_thread.isRunning():
                 self._serial_thread.send_command("S")
@@ -497,16 +653,34 @@ class MainWindow(QMainWindow):
         except Exception:
             log.exception("Failed to stop pump")
 
+    @pyqtSlot(str)
+    def _on_add_annotation(self, text: str):
+        """Add a manual annotation marker to the trace."""
+        try:
+            if self._recording_active:
+                self._register_annotation(text)
+                self.statusBar().showMessage(f"Annotation added: {text}", 4000)
+        except Exception:
+            log.exception("Failed to add annotation")
+
     @pyqtSlot()
     def _on_start_recording(self):
         """Clear the plot, open a new CSV file, and begin recording."""
         try:
+            run_setup = self._prompt_run_setup()
+            if not run_setup:
+                return
+
             # Fresh trace for this recording session
             self.pressure_plot_widget.clear_plot()
-            self._pending_pump_marker_events.clear()
+            self._pending_csv_events.clear()
+            self._pending_csv_sample_row = None
             self._pending_plot_samples.clear()
             self._csv_row_buffer.clear()
-            self._start_recording()
+            self._start_recording(
+                run_setup["csv_path"],
+                run_setup.get("metadata", {}),
+            )
             if not self._csv_writer:
                 self.statusBar().showMessage("Failed to start recording.", 4000)
                 self._recording_active = False
@@ -514,6 +688,7 @@ class MainWindow(QMainWindow):
                 return
             self._t_offset = 0.0
             self._last_raw_t = 0.0
+            self._recording_time_origin = None
             self._last_status_update_s = 0.0
             self._last_console_update_s = 0.0
             self._recording_active = True
@@ -527,11 +702,15 @@ class MainWindow(QMainWindow):
         """Finalize the CSV recording."""
         try:
             self._drain_plot_samples()
+            self._attach_pending_events_to_pending_row()
+            self._finalize_pending_csv_sample_row()
             self._flush_csv_rows()
             self._csv_flush_timer.stop()
             self._stop_recording()
             self._recording_active = False
-            self._pending_pump_marker_events.clear()
+            self._recording_time_origin = None
+            self._pending_csv_events.clear()
+            self._pending_csv_sample_row = None
             self._pending_plot_samples.clear()
             self._csv_row_buffer.clear()
             self.pump_ctrl.update_recording_state(False)
@@ -549,42 +728,47 @@ class MainWindow(QMainWindow):
         return "Pump ON" if running else "Pump OFF"
 
     @classmethod
-    def _build_plot_export_rows(cls, times, pressures, masses, pump_markers):
-        """Build CSV rows where marker rows are separated from sample rows."""
+    def _build_plot_export_rows(cls, times, pressures, masses, pump_markers, annotation_markers=None):
+        """Build CSV rows with marker metadata folded into sample rows."""
+        # Merge pump markers and annotations into a single sorted event list
+        all_events = []
+        for t, running in (pump_markers or []):
+            all_events.append((t, cls._pump_event_label(bool(running)), running))
+        for t, label in (annotation_markers or []):
+            all_events.append((t, label, None))
+        all_events.sort(key=lambda e: e[0])
+
         rows = []
-        sorted_markers = sorted(pump_markers, key=lambda pair: pair[0]) if pump_markers else []
-        marker_idx = 0
+        ev_idx = 0
         running = False
         eps = 1e-9
+        pending_row = None
 
         for t, p, m in zip(times, pressures, masses):
-            events_here = []
-            while marker_idx < len(sorted_markers) and sorted_markers[marker_idx][0] <= t + eps:
-                marker_t, marker_running = sorted_markers[marker_idx]
-                running = bool(marker_running)
-                label = cls._pump_event_label(running)
-                events_here.append(label)
-                rows.append(["MARKER", "", "", "", "", 1 if running else 0, label, f"{marker_t:.4f}"])
-                marker_idx += 1
-            rows.append(
-                [
-                    "DATA",
-                    "",
-                    f"{t:.4f}",
-                    f"{p:.4f}",
-                    f"{m:.4f}",
-                    1 if running else 0,
-                    ";".join(events_here),
-                    "",
-                ]
+            if pending_row is not None:
+                rows.append(pending_row)
+
+            labels_here = []
+            while ev_idx < len(all_events) and all_events[ev_idx][0] <= t + eps:
+                _, lbl, ev_running = all_events[ev_idx]
+                if ev_running is not None:
+                    running = bool(ev_running)
+                labels_here.append(lbl)
+                ev_idx += 1
+
+            pending_row = cls._build_csv_sample_row(
+                t_plot=t,
+                pressure=p,
+                mass=m,
+                pump_running=running,
+                event_labels=labels_here,
             )
 
-        while marker_idx < len(sorted_markers):
-            marker_t, marker_running = sorted_markers[marker_idx]
-            running = bool(marker_running)
-            label = cls._pump_event_label(running)
-            rows.append(["MARKER", "", "", "", "", 1 if running else 0, label, f"{marker_t:.4f}"])
-            marker_idx += 1
+        if pending_row is not None:
+            if ev_idx < len(all_events):
+                remaining = [lbl for _, lbl, _ in all_events[ev_idx:]]
+                cls._append_event_labels_to_csv_row(pending_row, remaining)
+            rows.append(pending_row)
 
         return rows
 
@@ -603,21 +787,11 @@ class MainWindow(QMainWindow):
                     data["pressure"],
                     data["mass"],
                     data.get("pump_markers", []),
+                    data.get("annotation_markers", []),
                 )
                 with open(path, "w", newline="") as f:
                     writer = csv.writer(f)
-                    writer.writerow(
-                        [
-                            "Row Type",
-                            "Frame Index",
-                            "Time (s)",
-                            "Pressure (mmHg)",
-                            "Mass (g)",
-                            "Pump Running",
-                            "Pump Event",
-                            "Marker Time (s)",
-                        ]
-                    )
+                    writer.writerow(CSV_HEADER)
                     writer.writerows(export_rows)
                 self.statusBar().showMessage(f"Plot data exported to {path}", 3000)
             except Exception as e:
@@ -647,6 +821,29 @@ class MainWindow(QMainWindow):
         if details:
             dlg.setDetailedText(details)
         dlg.exec_()
+
+    def _open_previous_run(self):
+        """Open a previously recorded CSV in a viewer window."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Recorded Run",
+            config.CYSTO_RESULTS_DIR,
+            "CSV Files (*.csv)",
+        )
+        if not path:
+            return
+        try:
+            run_data = load_run_csv(path)
+            metadata = load_run_metadata(path)
+            viewer = RunViewerWindow(path, run_data, metadata, parent=None)
+            self._viewer_windows.append(viewer)
+            viewer.destroyed.connect(lambda: self._viewer_windows.remove(viewer) if viewer in self._viewer_windows else None)
+            viewer.show()
+        except Exception as e:
+            log.exception("Failed to open run: %s", path)
+            QMessageBox.critical(
+                self, "Open Run Error", f"Could not open run file:\n{e}"
+            )
 
     def _show_about_dialog(self):
         QMessageBox.information(self, f"About {APP_NAME}", ABOUT_TEXT)
@@ -745,8 +942,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"CystoMoto Device: {status}", 4000)
         self.serial_status_label.setText(f"Serial: {status}")
 
+        status_lower = status.lower()
         connected_flag = (
-            "connected" in status.lower() or "opened serial port" in status.lower()
+            status_lower == "connected"
+            or status_lower.startswith("connected to ")
+            or status_lower.startswith("reconnected to ")
+            or "opened serial port" in status_lower
         )
         self.top_ctrl.update_connection_status(status, connected_flag)
         self.pump_ctrl.update_connection_status(connected_flag)
@@ -797,59 +998,38 @@ class MainWindow(QMainWindow):
         now_s = time.monotonic()
         # Throttle device status repaint to keep UI smooth at high packet rates.
         if (now_s - self._last_status_update_s) >= self._status_update_interval_s:
-            self.top_ctrl.update_device_data(idx, t_adj, p)
+            self.top_ctrl.update_device_data(p, mass)
             self._last_status_update_s = now_s
 
         # Plot and CSV are only active while recording
         if not self._recording_active:
             return
 
-        marker_events = []
-        if self._pending_pump_marker_events:
-            while self._pending_pump_marker_events:
-                is_running = bool(self._pending_pump_marker_events.popleft())
-                self.pressure_plot_widget.add_pump_marker(
-                    t_adj, running=is_running, redraw=False
-                )
-                marker_events.append((is_running, self._pump_event_label(is_running)))
+        if self._recording_time_origin is None:
+            self._recording_time_origin = t_adj
+        t_plot = max(0.0, t_adj - self._recording_time_origin)
 
-        self._pending_plot_samples.append((t_adj, p, mass))
+        self._pending_plot_samples.append((t_plot, p, mass))
         if len(self._pending_plot_samples) >= self._plot_batch_size:
             self._drain_plot_samples()
 
         if self._csv_writer:
-            pump_event = ";".join(label for _, label in marker_events)
-            self._queue_csv_row(
-                [
-                    "DATA",
-                    idx,
-                    f"{t_adj:.4f}",
-                    f"{p:.4f}",
-                    f"{mass:.4f}",
-                    1 if self._pump_running else 0,
-                    pump_event,
-                    "",
-                ]
+            self._finalize_pending_csv_sample_row()
+            pending_labels = [lbl for _, lbl in self._pending_csv_events]
+            self._pending_csv_events.clear()
+            self._pending_csv_sample_row = self._build_csv_sample_row(
+                t_plot=t_plot,
+                pressure=p,
+                mass=mass,
+                pump_running=self._pump_running,
+                event_labels=pending_labels,
             )
-            for is_running, label in marker_events:
-                self._queue_csv_row(
-                    [
-                        "MARKER",
-                        "",
-                        "",
-                        "",
-                        "",
-                        1 if is_running else 0,
-                        label,
-                        f"{t_adj:.4f}",
-                    ]
-                )
 
         if self.dock_console.isVisible() and (
             now_s - self._last_console_update_s
         ) >= self._console_update_interval_s:
             self.console_out_textedit.append(
-                f"Data: Idx={idx}, Time={t_adj:.3f}s, P={p:.2f}, Mass={mass:.2f}g"
+                f"Data: Idx={idx}, Time={t_plot:.3f}s, P={p:.2f}, Mass={mass:.2f}g"
             )
             self._last_console_update_s = now_s
 

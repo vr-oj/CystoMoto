@@ -7,7 +7,7 @@
 ; This script expects PyInstaller to have produced dist\CystoMoto\ first.
 
 #define MyAppName        "CystoMoto"
-#define MyAppVersion     "0.0.0"
+#define MyAppVersion     "1.0.0"
 #define MyAppPublisher   "CystoMoto"
 #define MyAppURL         "https://github.com/your-org/CystoMoto"
 #define MyAppExeName     "CystoMoto.exe"
