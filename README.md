@@ -107,7 +107,7 @@ Upload both DMGs to your GitHub release assets.
 ## Install from Source
 
 ### Requirements
-- Python 3.10 or newer
+- Python 3.10-3.13 (3.11/3.12 recommended on Windows)
 - pip
 
 ### Steps
@@ -127,6 +127,9 @@ source .venv/bin/activate
 .venv\Scripts\activate
 
 # 3. Install dependencies
+# If pip is forced offline in your shell, clear it first:
+# PowerShell: Remove-Item Env:PIP_NO_INDEX -ErrorAction SilentlyContinue
+# cmd.exe:    set PIP_NO_INDEX=
 pip install -r cysto_app/requirements.txt
 
 # 4. Run the app

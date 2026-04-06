@@ -2,6 +2,8 @@ matplotlib>=3.9
 numpy>=1.26
 pyqtgraph>=0.13
 PyQt5==5.15.11
-PyQt5-Qt5==5.15.18
+# Windows commonly resolves Qt runtime wheels at 5.15.2, while macOS/Linux can use 5.15.18.
+PyQt5-Qt5==5.15.2; platform_system == "Windows"
+PyQt5-Qt5==5.15.18; platform_system != "Windows"
 PyQt5_sip==12.18.0
 pyserial>=3.5
