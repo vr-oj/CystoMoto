@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''main_window.py''\\).read\\(\\)\\); ast.parse\\(open\\(''ui/control_panels/pump_control_panel.py''\\).read\\(\\)\\); ast.parse\\(open\\(''ui/canvas/pressure_plot_widget.py''\\).read\\(\\)\\); ast.parse\\(open\\(''ui/canvas/pressure_plot_widget_mpl.py''\\).read\\(\\)\\); print\\(''All files parse OK''\\)\")",
-      "Bash(python -c \"import ast; ast.parse\\(open\\(''main_window.py''\\).read\\(\\)\\); print\\(''OK''\\)\")",
-      "Bash(python -c \":*)"
-    ]
-  }
-}
