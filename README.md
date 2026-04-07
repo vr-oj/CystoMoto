@@ -1,3 +1,4 @@
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
 # CystoMoto
 
 Live pressure and mass data logger for cystometry experiments. Connects to an Arduino-controlled pressure transducer, displays real-time traces, controls a syringe pump, and saves synchronized CSV files.
@@ -179,4 +180,4 @@ If you do not have hardware connected, choose **Virtual CystoMoto** in the devic
 
 ## License
 
-[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+[GNU General Public License v3.0 only (GPL-3.0-only)](https://www.gnu.org/licenses/gpl-3.0-standalone.html)

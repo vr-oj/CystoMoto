@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # cysto_app/utils/utils.py
 import time
 import serial.tools.list_ports

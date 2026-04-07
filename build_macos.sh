@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-only
 # build_macos.sh — Build CystoMoto.app and package it as a .dmg (local-first)
 #
 # Why this script builds in /tmp:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Qt runtime diagnostics and self-healing helpers for macOS/PyQt5."""
 
 from __future__ import annotations

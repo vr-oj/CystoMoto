@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build specification for CystoMoto - Windows.
 

@@ -1,3 +1,4 @@
+; SPDX-License-Identifier: GPL-3.0-only
 ; CystoMoto Inno Setup Script
 ; Requires Inno Setup 6.x — https://jrsoftware.org/isinfo.php
 ;

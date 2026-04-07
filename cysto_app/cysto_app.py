@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # cysto_app/cysto_app.py
 
 import sys
