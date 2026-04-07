@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # cysto_app/ui/control_panels/plot_control_panel.py
 
 import logging

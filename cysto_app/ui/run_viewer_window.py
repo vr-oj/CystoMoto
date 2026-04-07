@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Non-modal window for viewing a previously recorded CystoMoto run."""
 
 import logging

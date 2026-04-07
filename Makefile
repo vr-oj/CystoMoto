@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 SHELL := /bin/zsh
 
 PYTHON := ./.cystomoto/bin/python

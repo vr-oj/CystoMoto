@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build specification for CystoMoto - macOS.
 
@@ -89,7 +90,7 @@ app = BUNDLE(
         "CFBundleShortVersionString": app_version,
         "CFBundleIdentifier": bundle_identifier,
         "NSHighResolutionCapable": True,
-        "NSHumanReadableCopyright": "CC BY-NC-SA 4.0",
+        "NSHumanReadableCopyright": "GPL-3.0-only",
         "LSMinimumSystemVersion": minimum_macos,
         "NSPrincipalClass": "NSApplication",
         "NSRequiresAquaSystemAppearance": False,

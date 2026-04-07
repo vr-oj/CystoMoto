@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 """Load previously recorded CystoMoto CSV runs back into plot-ready data."""
 
 import csv

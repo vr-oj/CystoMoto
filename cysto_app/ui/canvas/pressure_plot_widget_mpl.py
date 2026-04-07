@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-only
 # pressure_plot_widget.py
 import os
 import time

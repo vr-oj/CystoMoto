@@ -1,4 +1,5 @@
 @echo off
+:: SPDX-License-Identifier: GPL-3.0-only
 setlocal EnableExtensions EnableDelayedExpansion
 
 set "APP_VERSION=%CYSTOMOTO_VERSION%"
